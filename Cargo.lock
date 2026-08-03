@@ -767,10 +767,12 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "pulldown-cmark",
  "reqwest",
  "serde",
  "serde_json",
+ "tempfile",
  "toml",
 ]
 

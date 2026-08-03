@@ -88,22 +88,42 @@ impl Key {
     /// `web_base` all name the same setting, since the README documents both
     /// spellings and retyping the one from the wrong column is expected.
     pub fn parse(input: &str) -> Result<Key> {
-        let lowered = input.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+        let lowered = input
+            .trim()
+            .to_ascii_lowercase()
+            .replace(['-', ' ', '.'], "_");
         let name = lowered.strip_prefix("plane_").unwrap_or(lowered.as_str());
         if let Some(key) = KEYS.iter().find(|k| k.name() == name) {
             return Ok(*key);
         }
+        let shown = for_error(input);
         if looks_like_a_secret(name) {
             bail!(
-                "`{input}` looks like a token, and the PAT is never stored in the config file.\nAuth stays out of it: set PLANE_API_KEY for one-off runs, or point `pass_vault` / `pass_item` / `pass_field` at the Proton Pass entry holding the token."
+                "`{shown}` looks like a token, and the PAT is never stored in the config file.\nAuth stays out of it: set PLANE_API_KEY for one-off runs, or point `pass_vault` / `pass_item` / `pass_field` at the Proton Pass entry holding the token."
             );
         }
-        bail!("Unknown config key `{input}`. Valid keys: {}.", key_list());
+        bail!("Unknown config key `{shown}`. Valid keys: {}.", key_list());
     }
 }
 
 fn key_list() -> String {
     KEYS.iter().map(|k| k.name()).collect::<Vec<_>>().join(", ")
+}
+
+/// How much of a rejected key an error may echo.
+const MAX_ECHO: usize = 32;
+
+/// A rejected key as the error prints it. Swapping the positionals
+/// (`plane config set <token> workspace`) puts the PAT where the key belongs,
+/// and the error outlives the command in a scrollback or a log, so the echo
+/// is cut short: enough to recognize the typo, not enough to be the token.
+fn for_error(input: &str) -> String {
+    let trimmed = input.trim();
+    let mut shown: String = trimmed.chars().take(MAX_ECHO).collect();
+    if trimmed.chars().count() > MAX_ECHO {
+        shown.push('…');
+    }
+    shown
 }
 
 /// Whether a rejected key name reads as a credential rather than as a typo,
@@ -200,15 +220,19 @@ impl ConfigFile {
         }
         let body = toml::to_string(self).context("Failed to serialize the config")?;
         let raw = format!("# Written by `plane config set`. The PAT is never stored here.\n{body}");
-        std::fs::write(path, raw).with_context(|| format!("Failed to write {}", path.display()))?;
-        // Not a secret today, but it names the vault entry that holds one,
-        // and a config file readable by every account on the box is a habit
-        // worth not having.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                .with_context(|| format!("Failed to restrict {} to 0600", path.display()))?;
+
+        // Written beside the target and renamed over it. A rename within one
+        // directory is atomic, so an interrupted write leaves the previous
+        // file whole instead of a truncated one that would then fail to parse
+        // on the next run.
+        let temp = temp_path(path);
+        if let Err(e) = write_private(&temp, raw.as_bytes()) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e).with_context(|| format!("Failed to write {}", temp.display()));
+        }
+        if let Err(e) = std::fs::rename(&temp, path) {
+            let _ = std::fs::remove_file(&temp);
+            return Err(e).with_context(|| format!("Failed to write {}", path.display()));
         }
         Ok(())
     }
@@ -220,6 +244,47 @@ impl ConfigFile {
     pub fn save(&self) -> Result<()> {
         self.save_to(&path()?)
     }
+}
+
+/// The scratch path `save_to` renames from, in the target's own directory so
+/// the rename stays within one filesystem, and carrying the pid so two
+/// processes writing at once cannot share it.
+fn temp_path(path: &Path) -> PathBuf {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("config.toml");
+    path.with_file_name(format!(".{name}.{}.tmp", std::process::id()))
+}
+
+/// Create a file only this account can read.
+///
+/// Not a secret today, but it names the vault entry that holds one, and a
+/// config file readable by every account on the box is a habit worth not
+/// having. The mode rides the create call rather than a `set_permissions`
+/// after the write, so the content is never briefly world-readable. The
+/// explicit `set_permissions` still runs, because `mode` only applies to a
+/// file this call creates and a scratch file left by a killed run would
+/// otherwise keep whatever mode it already had.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
 }
 
 /// Trailing slashes on the two origins, so `https://plane.example.com/` and
@@ -257,6 +322,19 @@ pub struct Resolved {
     pub key: Key,
     pub value: Option<String>,
     pub source: Source,
+}
+
+impl Resolved {
+    /// What `config show` prints in the source column. `default` would be a
+    /// lie for the two keys that have none: nothing was applied, the setting
+    /// is simply missing, and the difference is what the reader acts on.
+    pub fn source_label(&self) -> &'static str {
+        if self.value.is_none() {
+            "unset"
+        } else {
+            self.source.label()
+        }
+    }
 }
 
 pub fn resolve(key: Key, file: &ConfigFile) -> Resolved {
@@ -454,6 +532,7 @@ mod tests {
             "pat",
             "token",
             "auth-token",
+            "api.key",
             "secret",
             "password",
             "credential",
@@ -477,6 +556,22 @@ mod tests {
     }
 
     #[test]
+    fn a_rejected_key_is_echoed_only_far_enough_to_recognize() {
+        // What a swapped `plane config set <token> workspace` would echo.
+        let long = "z".repeat(80);
+        let err = Key::parse(&long).unwrap_err().to_string();
+        assert!(
+            err.contains(&format!("`{}…`", "z".repeat(MAX_ECHO))),
+            "{err}"
+        );
+        assert!(!err.contains(&long), "{err}");
+
+        // Short enough to be a typo: printed whole, without an ellipsis.
+        let err = Key::parse("workspce").unwrap_err().to_string();
+        assert!(err.contains("`workspce`"), "{err}");
+    }
+
+    #[test]
     fn keys_parse_in_every_spelling_the_docs_use() {
         assert_eq!(Key::parse("web_base").unwrap(), Key::WebBase);
         assert_eq!(Key::parse("web-base").unwrap(), Key::WebBase);
@@ -486,9 +581,8 @@ mod tests {
 
     #[test]
     fn set_and_unset_round_trip_through_the_file() {
-        let dir = std::env::temp_dir().join(format!("plane-cli-config-{}", std::process::id()));
-        let path = dir.join("config.toml");
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
 
         // A file that is not there yet reads as empty rather than as an error.
         assert_eq!(ConfigFile::load_from(&path).unwrap(), ConfigFile::default());
@@ -531,15 +625,46 @@ mod tests {
         assert_eq!(by(Key::Workspace).source, Source::File);
         assert_eq!(by(Key::WebBase).source, Source::Env);
         assert_eq!(by(Key::ApiBase).source, Source::Default);
+    }
 
-        let _ = std::fs::remove_dir_all(&dir);
+    #[cfg(unix)]
+    #[test]
+    fn the_file_is_created_private_however_permissive_the_umask_is() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut file = ConfigFile::default();
+        file.set(Key::Workspace, "acme").unwrap();
+
+        // Under umask 000 a plainly created file lands 0666, so this fails
+        // unless the mode comes from the create call itself.
+        let previous = unsafe { libc::umask(0o000) };
+        let fresh = file.save_to(&path);
+        // A file that was already there is replaced by the renamed scratch
+        // file, so a 0644 predecessor cannot carry its mode over either.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let overwrite = file.save_to(&path);
+        unsafe { libc::umask(previous) };
+        fresh.unwrap();
+        overwrite.unwrap();
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+
+        // And the scratch file is renamed, not left beside the real one.
+        let mut entries: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        entries.sort();
+        assert_eq!(entries, ["config.toml"]);
     }
 
     #[test]
     fn a_malformed_file_names_itself_instead_of_panicking() {
-        let dir = std::env::temp_dir().join(format!("plane-cli-broken-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
 
         std::fs::write(&path, "workspace = \n").unwrap();
         let err = ConfigFile::load_from(&path).unwrap_err().to_string();
@@ -548,8 +673,6 @@ mod tests {
         // A key that is not a setting is a typo, not something to ignore.
         std::fs::write(&path, "workspac = \"acme\"\n").unwrap();
         assert!(ConfigFile::load_from(&path).is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

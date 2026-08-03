@@ -112,7 +112,7 @@ pub fn config_show(path: &str, exists: bool, rows: &[Resolved]) -> String {
             "{}  {}  {}\n",
             pad(&names[i], kw),
             pad(dash(&values[i]), vw),
-            r.source.label()
+            r.source_label()
         ));
     }
     out.push_str("\nauth: PLANE_API_KEY, else pass-cli. The token is never stored in this file.");
@@ -434,6 +434,49 @@ mod tests {
             lines[2]
         );
         assert_eq!(attachment_list(&[], "RES-50"), "RES-50: no attachments");
+    }
+
+    #[test]
+    fn config_show_names_the_source_of_every_row_and_unset_where_there_is_none() {
+        use crate::config::{Key, Resolved, Source};
+
+        let row = |key: Key, value: Option<&str>, source: Source| Resolved {
+            key,
+            value: value.map(str::to_string),
+            source,
+        };
+        let rows = [
+            row(Key::Workspace, Some("acme"), Source::File),
+            row(
+                Key::ApiBase,
+                Some("http://localhost:8090/api/v1"),
+                Source::Default,
+            ),
+            // No default and never set: the row exists, the value does not.
+            row(Key::WebBase, None, Source::Default),
+            row(Key::PassField, Some("PAT"), Source::Env),
+        ];
+
+        let out = config_show("/tmp/plane/config.toml", true, &rows);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines[0], "/tmp/plane/config.toml");
+        assert_eq!(lines[1], "workspace   acme                          file");
+        assert_eq!(
+            lines[2],
+            "api_base    http://localhost:8090/api/v1  default"
+        );
+        assert_eq!(lines[3], "web_base    -                             unset");
+        assert_eq!(lines[4], "pass_field  PAT                           env");
+        assert_eq!(lines[5], "");
+        assert!(lines[6].contains("The token is never stored in this file."));
+
+        // A file that is not there yet says so, so an all-`default` table
+        // does not read as a file that was written and ignored.
+        let out = config_show("/tmp/plane/config.toml", false, &rows);
+        assert_eq!(
+            out.lines().next().unwrap(),
+            "/tmp/plane/config.toml  (not written yet)"
+        );
     }
 
     #[test]

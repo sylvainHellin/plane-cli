@@ -37,7 +37,7 @@ An export only reaches the processes that descend from the shell that ran it.
 | `pass_field` | `PLANE_PASS_FIELD` | `PAT` |
 
 Precedence per setting is variable, then file, then default, so `PLANE_API_BASE=... plane project list` still points one call at another instance without touching the file.
-`plane config show` prints the effective value of every setting next to the source it came from (`env`, `file`, `default`), because a variable shadowing the file is otherwise indistinguishable from a file that was never written.
+`plane config show` prints the effective value of every setting next to the source it came from (`env`, `file`, `default`, or `unset` for the two keys that have no default and were never set), because a variable shadowing the file is otherwise indistinguishable from a file that was never written.
 
 ```
 plane config set <key> <value>
