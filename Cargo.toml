@@ -1,0 +1,19 @@
+[package]
+name = "plane-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for a self-hosted Plane CE instance (issues, modules, states)"
+license = "MIT"
+repository = "https://github.com/sylvainHellin/plane-cli"
+
+[[bin]]
+name = "plane"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.6", features = ["derive"] }
+pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
+reqwest = { version = "0.12", features = ["blocking", "json", "multipart"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

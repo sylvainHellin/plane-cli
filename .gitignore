@@ -1,0 +1,7 @@
+/target
+/.agents/
+/.pi-subagents/
+/.nvim/
+/PLANE-CLI-PLAN.md
+*.swp
+.DS_Store
