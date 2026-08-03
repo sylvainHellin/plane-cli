@@ -6,6 +6,7 @@
 use anyhow::{anyhow, Result};
 use serde_json::Value;
 
+use crate::config::{self, Resolved};
 use crate::markdown;
 
 /// Print either the raw API value or a rendered view.
@@ -84,23 +85,38 @@ fn pad(s: &str, w: usize) -> String {
     format!("{s}{}", " ".repeat(w.saturating_sub(n)))
 }
 
-/// The browser origin of the instance, from `PLANE_WEB_BASE`.
-///
-/// Deliberately without a default. The web origin is not derivable from the
-/// API base (a reverse proxy can serve them on different hosts or ports), and
-/// a placeholder would print a link that silently goes nowhere. Unset means
-/// no `url:` line at all, which is honest.
-pub fn web_base() -> Option<String> {
-    std::env::var("PLANE_WEB_BASE")
-        .ok()
-        .map(|b| b.trim_end_matches('/').to_string())
-        .filter(|b| !b.is_empty())
+/// Browser URL for an issue, which is what a vault bridge line points at.
+/// `None` when no web origin is configured.
+pub fn issue_url(workspace: &str, reference: &str) -> Option<String> {
+    config::web_base().map(|base| format!("{base}/{workspace}/browse/{reference}/"))
 }
 
-/// Browser URL for an issue, which is what a vault bridge line points at.
-/// `None` when `PLANE_WEB_BASE` is unset.
-pub fn issue_url(workspace: &str, reference: &str) -> Option<String> {
-    web_base().map(|base| format!("{base}/{workspace}/browse/{reference}/"))
+/// The effective settings, each with the source it came from. The source
+/// column is the point of the command: a variable shadowing the file is
+/// otherwise indistinguishable from a file that was never written.
+pub fn config_show(path: &str, exists: bool, rows: &[Resolved]) -> String {
+    let names: Vec<String> = rows.iter().map(|r| r.key.name().to_string()).collect();
+    let values: Vec<String> = rows
+        .iter()
+        .map(|r| r.value.clone().unwrap_or_default())
+        .collect();
+    let kw = width(&names);
+    let vw = width(&values);
+
+    let mut out = format!(
+        "{path}{}\n",
+        if exists { "" } else { "  (not written yet)" }
+    );
+    for (i, r) in rows.iter().enumerate() {
+        out.push_str(&format!(
+            "{}  {}  {}\n",
+            pad(&names[i], kw),
+            pad(dash(&values[i]), vw),
+            r.source.label()
+        ));
+    }
+    out.push_str("\nauth: PLANE_API_KEY, else pass-cli. The token is never stored in this file.");
+    out
 }
 
 /// One issue in full.

@@ -1,6 +1,7 @@
 mod auth;
 mod client;
 mod cmd;
+mod config;
 mod markdown;
 mod mime;
 mod note;
@@ -14,7 +15,7 @@ use std::path::PathBuf;
     name = "plane",
     version,
     about = "CLI for a self-hosted Plane CE instance",
-    after_help = "Auth: PLANE_API_KEY, else a PAT read from Proton Pass (PLANE_PASS_VAULT, PLANE_PASS_ITEM, PLANE_PASS_FIELD).\nEnv: PLANE_WORKSPACE (required), PLANE_API_BASE, PLANE_WEB_BASE."
+    after_help = "Settings live in ~/.config/plane/config.toml; see `plane config show`.\nEach one is overridable for a single call by its variable (PLANE_WORKSPACE, PLANE_API_BASE, PLANE_WEB_BASE, PLANE_PASS_*).\nAuth: PLANE_API_KEY, else a PAT read from Proton Pass through pass-cli. The token is never stored in the config file."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -46,6 +47,35 @@ enum Commands {
     /// List the labels of a project
     #[command(subcommand)]
     Label(LabelCmd),
+
+    /// Read and write the stored settings
+    #[command(subcommand)]
+    Config(ConfigCmd),
+}
+
+#[derive(Subcommand)]
+enum ConfigCmd {
+    /// Store a setting, e.g. `plane config set workspace acme`
+    Set {
+        /// workspace, api_base, web_base, pass_vault, pass_item, pass_field
+        key: String,
+
+        /// The value to store. The PAT is not storable: it stays in
+        /// PLANE_API_KEY or in Proton Pass.
+        value: String,
+    },
+
+    /// Remove a setting, falling back to its default
+    Unset {
+        /// The setting to remove
+        key: String,
+    },
+
+    /// Print the effective settings and where each one comes from
+    Show,
+
+    /// Print the path of the config file
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -268,6 +298,12 @@ fn main() {
         Commands::Module(ModuleCmd::List { project }) => cmd::module_list(&project, json),
         Commands::State(StateCmd::List { project }) => cmd::state_list(&project, json),
         Commands::Label(LabelCmd::List { project }) => cmd::label_list(&project, json),
+        Commands::Config(config) => match config {
+            ConfigCmd::Set { key, value } => cmd::config_set(&key, &value, json),
+            ConfigCmd::Unset { key } => cmd::config_unset(&key, json),
+            ConfigCmd::Show => cmd::config_show(json),
+            ConfigCmd::Path => cmd::config_path(json),
+        },
     };
 
     if let Err(e) = result {
@@ -363,6 +399,24 @@ mod tests {
         }
         // A reference with no file is a no-op, so clap refuses it.
         assert!(Cli::try_parse_from(["plane", "issue", "attach", "RES-50"]).is_err());
+    }
+
+    #[test]
+    fn config_set_takes_a_key_and_a_value_and_nothing_less() {
+        let cli = Cli::try_parse_from(["plane", "config", "set", "workspace", "acme"]).unwrap();
+        match cli.command {
+            Commands::Config(ConfigCmd::Set { key, value }) => {
+                assert_eq!(key, "workspace");
+                assert_eq!(value, "acme");
+            }
+            _ => panic!("wrong command"),
+        }
+        // A key with no value would otherwise read as "clear it", which is
+        // what `unset` is for.
+        assert!(Cli::try_parse_from(["plane", "config", "set", "workspace"]).is_err());
+        assert!(Cli::try_parse_from(["plane", "config", "unset", "workspace"]).is_ok());
+        assert!(Cli::try_parse_from(["plane", "config", "show"]).is_ok());
+        assert!(Cli::try_parse_from(["plane", "config", "path"]).is_ok());
     }
 
     #[test]

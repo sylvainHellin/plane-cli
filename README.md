@@ -16,27 +16,51 @@ The CLI encodes the quirks once, reads the token itself so it never passes throu
 cargo install --path .
 ```
 
+## Configuration
+
+```
+plane config set workspace acme
+plane config show
+```
+
+Settings live in `~/.config/plane/config.toml` (`$XDG_CONFIG_HOME/plane/config.toml` when that variable is set), written with `0600` permissions.
+A file rather than exported variables, because every context that runs `plane` reads the same file: an interactive shell, a systemd user unit, an editor, an agent, a cron job.
+An export only reaches the processes that descend from the shell that ran it.
+
+| Key | Variable that overrides it | Default |
+|---|---|---|
+| `workspace` | `PLANE_WORKSPACE` | none; required |
+| `api_base` | `PLANE_API_BASE` | `http://localhost:8090/api/v1` |
+| `web_base` | `PLANE_WEB_BASE` | none; issue URLs are omitted when unset |
+| `pass_vault` | `PLANE_PASS_VAULT` | `Personal` |
+| `pass_item` | `PLANE_PASS_ITEM` | `plane` |
+| `pass_field` | `PLANE_PASS_FIELD` | `PAT` |
+
+Precedence per setting is variable, then file, then default, so `PLANE_API_BASE=... plane project list` still points one call at another instance without touching the file.
+`plane config show` prints the effective value of every setting next to the source it came from (`env`, `file`, `default`), because a variable shadowing the file is otherwise indistinguishable from a file that was never written.
+
+```
+plane config set <key> <value>
+plane config unset <key>          # falls back to the default
+plane config show
+plane config path
+```
+
+An unknown key is an error listing the valid ones, rather than a line quietly stored in the file and never read.
+
+`workspace` is the workspace slug, which is the path segment the web UI puts before `/browse/`.
+Every API path is scoped by it, so there is no sensible default and an unset one is an error rather than a guess.
+
+`web_base` is the browser origin, which is not derivable from the API base when a reverse proxy serves them differently.
+Without it the commands work and simply print no `url:` line, which is better than printing a link that goes nowhere.
+
 ## Auth
 
 `PLANE_API_KEY` if set, otherwise the token is read from a Proton Pass entry through [`pass-cli`](https://proton.me/pass).
-Which entry is configurable, so nothing about one person's vault layout is baked into the binary.
-The token is never printed, logged, or written to disk.
+Which entry is configurable through `pass_vault` / `pass_item` / `pass_field`, so nothing about one person's vault layout is baked into the binary.
 
-| Variable | Default |
-|---|---|
-| `PLANE_WORKSPACE` | none; required |
-| `PLANE_API_KEY` | read from Proton Pass |
-| `PLANE_API_BASE` | `http://localhost:8090/api/v1` |
-| `PLANE_WEB_BASE` | none; issue URLs are omitted when unset |
-| `PLANE_PASS_VAULT` | `Personal` |
-| `PLANE_PASS_ITEM` | `plane` |
-| `PLANE_PASS_FIELD` | `PAT` |
-
-`PLANE_WORKSPACE` is the workspace slug, which is the path segment the web UI puts before `/browse/`.
-Every API path is scoped by it, so there is no sensible default and an unset one is an error rather than a guess.
-
-`PLANE_WEB_BASE` is the browser origin, which is not derivable from the API base when a reverse proxy serves them differently.
-Without it the commands work and simply print no `url:` line, which is better than printing a link that goes nowhere.
+The token itself is not a setting and `plane config set` refuses to store one: a key name that reads as a credential (`api_key`, `token`, `pat`, ...) is rejected with that reason.
+It is never printed, logged, or written to disk.
 
 ## Commands
 
@@ -53,6 +77,7 @@ plane project list
 plane module list RES
 plane state list RES
 plane label list RES
+plane config set|unset|show|path
 ```
 
 `--json` is global, so `plane issue get RES-12 --json | jq -r .name` works on every command.
@@ -135,15 +160,15 @@ Everything below was verified against a running CE instance and is encoded once 
 
 ## Using it against a remote instance
 
-Nothing but environment variables changes when the instance is not on localhost, as long as the reverse proxy in front of it routes `/api/v1`:
+Nothing but the configuration changes when the instance is not on localhost, as long as the reverse proxy in front of it routes `/api/v1`:
 
 ```
 git clone <this repo> && cd plane-cli
 cargo install --path .
 
-export PLANE_WORKSPACE=acme
-export PLANE_API_BASE=https://plane.example.com/api/v1
-export PLANE_WEB_BASE=https://plane.example.com
+plane config set workspace acme
+plane config set api_base https://plane.example.com/api/v1
+plane config set web_base https://plane.example.com
 export PLANE_API_KEY=<a personal access token>   # only if pass-cli is not set up here
 
 plane project list

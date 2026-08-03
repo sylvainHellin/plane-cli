@@ -6,10 +6,100 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::client::{self, Client, IssueRef};
+use crate::config::{self, ConfigFile, Key, Source};
 use crate::markdown;
 use crate::mime;
 use crate::note;
 use crate::output::{self, emit, field, required_field};
+
+// ---- configuration ----
+
+pub fn config_set(key: &str, value: &str, json: bool) -> Result<()> {
+    let key = Key::parse(key)?;
+    let mut file = ConfigFile::load()?;
+    file.set(key, value)?;
+    file.save()?;
+    let path = config::path()?;
+
+    // A variable shadowing what was just written is the one way this command
+    // can look like it did nothing, so it says so instead of staying silent.
+    let shadowed = config::resolve(key, &file).source == Source::Env;
+    let stored = file.get(key).unwrap_or_default().to_string();
+    emit(
+        &json!({
+            "path": path.display().to_string(),
+            "key": key.name(),
+            "value": stored,
+            "shadowed_by_env": shadowed,
+        }),
+        json,
+        || {
+            let mut line = format!("{} = {stored}  ->  {}", key.name(), path.display());
+            if shadowed {
+                line.push_str(&format!(
+                    "\nnote: {} is set in this environment and overrides the file.",
+                    key.env()
+                ));
+            }
+            line
+        },
+    );
+    Ok(())
+}
+
+pub fn config_unset(key: &str, json: bool) -> Result<()> {
+    let key = Key::parse(key)?;
+    let mut file = ConfigFile::load()?;
+    let removed = file.unset(key);
+    if removed {
+        file.save()?;
+    }
+    let path = config::path()?;
+    emit(
+        &json!({
+            "path": path.display().to_string(),
+            "key": key.name(),
+            "removed": removed,
+        }),
+        json,
+        || {
+            if removed {
+                format!("{} removed from {}", key.name(), path.display())
+            } else {
+                format!("{} was not set in {}", key.name(), path.display())
+            }
+        },
+    );
+    Ok(())
+}
+
+pub fn config_show(json: bool) -> Result<()> {
+    let file = ConfigFile::load()?;
+    let path = config::path()?;
+    let exists = path.exists();
+    let rows = config::effective(&file);
+
+    let mut settings = Map::new();
+    for r in &rows {
+        settings.insert(
+            r.key.name().to_string(),
+            json!({ "value": r.value, "source": r.source.label() }),
+        );
+    }
+    let path_text = path.display().to_string();
+    emit(
+        &json!({ "path": path_text, "exists": exists, "settings": settings }),
+        json,
+        || output::config_show(&path_text, exists, &rows),
+    );
+    Ok(())
+}
+
+pub fn config_path(json: bool) -> Result<()> {
+    let path = config::path()?.display().to_string();
+    emit(&json!({ "path": path }), json, || path.clone());
+    Ok(())
+}
 
 // ---- reads ----
 

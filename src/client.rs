@@ -20,8 +20,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use crate::auth;
+use crate::config;
 
-const DEFAULT_BASE: &str = "http://localhost:8090/api/v1";
 const PAGE_SIZE: u32 = 100;
 /// Ceiling on pages per list call. At `PAGE_SIZE` that is 50k records, far
 /// past anything this instance holds, so hitting it means the cursor is
@@ -48,14 +48,8 @@ pub struct Client {
 
 impl Client {
     pub fn new() -> Result<Self> {
-        let base = std::env::var("PLANE_API_BASE")
-            .unwrap_or_else(|_| DEFAULT_BASE.to_string())
-            .trim_end_matches('/')
-            .to_string();
-        // No default: every path here is workspace-scoped, and guessing a
-        // slug turns a missing setting into a 404 against someone else's
-        // workspace rather than into an answerable error.
-        let workspace = workspace_from_env()?;
+        let base = config::api_base()?;
+        let workspace = config::workspace()?;
         let http = reqwest::blocking::Client::builder()
             .timeout(Duration::from_secs(30))
             // The PAT travels as a custom `X-API-Key` header, and reqwest
@@ -134,7 +128,7 @@ impl Client {
             let hint = match status.as_u16() {
                 // 60 requests per minute per PAT.
                 429 => "\nThe PAT is rate-limited to 60 requests a minute; wait a minute and retry.".to_string(),
-                401 | 403 => format!("\nCheck the PAT (`pass-cli vault list` proves the session), and check PLANE_WORKSPACE: the slug is case-sensitive and lowercase, and this request used \"{}\".", self.workspace),
+                401 | 403 => format!("\nCheck the PAT (`pass-cli vault list` proves the session), and check the workspace slug (`plane config show`): it is case-sensitive and lowercase, and this request used \"{}\".", self.workspace),
                 502 | 503 => "\nPlane takes about 90 seconds to boot after a restart; a 502 right after one is expected.".to_string(),
                 _ => String::new(),
             };
@@ -449,17 +443,6 @@ impl Client {
         let labels = self.labels(project_id)?;
         resolve_all(&labels, names, "label")
     }
-}
-
-/// The workspace slug, which every request path is scoped by.
-fn workspace_from_env() -> Result<String> {
-    let slug = std::env::var("PLANE_WORKSPACE")
-        .ok()
-        .map(|w| w.trim().to_string())
-        .filter(|w| !w.is_empty());
-    slug.ok_or_else(|| {
-        anyhow!("Set PLANE_WORKSPACE to your Plane workspace slug. It is the path segment in the web UI URL, e.g. `acme` in https://plane.example.com/acme/browse/.")
-    })
 }
 
 /// Match every requested name against `items`, erroring on the first miss.
