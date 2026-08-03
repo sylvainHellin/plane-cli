@@ -24,17 +24,29 @@ pub fn config_set(key: &str, value: &str, json: bool) -> Result<()> {
     // A variable shadowing what was just written is the one way this command
     // can look like it did nothing, so it says so instead of staying silent.
     let shadowed = config::resolve(key, &file).source == Source::Env;
-    let stored = file.get(key).unwrap_or_default().to_string();
+    // Echoing a token back would put it in the scrollback of the terminal it
+    // was pasted into, and in the log of anything scripting this command.
+    let shown = if key.is_secret() {
+        config::MASK.to_string()
+    } else {
+        file.get(key).unwrap_or_default().to_string()
+    };
     emit(
         &json!({
             "path": path.display().to_string(),
             "key": key.name(),
-            "value": stored,
+            "value": if key.is_secret() { Value::Null } else { json!(shown) },
+            "secret": key.is_secret(),
             "shadowed_by_env": shadowed,
         }),
         json,
         || {
-            let mut line = format!("{} = {stored}  ->  {}", key.name(), path.display());
+            let mut line = format!("{} = {shown}  ->  {}", key.name(), path.display());
+            if key.is_secret() {
+                line.push_str(
+                    "\nnote: stored in plaintext, in a file only this account can read (0600). Where a Proton Pass session exists, pass-cli keeps the token off the disk instead.",
+                );
+            }
             if shadowed {
                 line.push_str(&format!(
                     "\nnote: {} is set in this environment and overrides the file.",
@@ -79,20 +91,38 @@ pub fn config_show(json: bool) -> Result<()> {
     let exists = path.exists();
     let rows = config::effective(&file);
 
-    let mut settings = Map::new();
-    for r in &rows {
-        settings.insert(
-            r.key.name().to_string(),
-            json!({ "value": r.value, "source": r.source.label() }),
-        );
-    }
     let path_text = path.display().to_string();
-    emit(
-        &json!({ "path": path_text, "exists": exists, "settings": settings }),
-        json,
-        || output::config_show(&path_text, exists, &rows),
-    );
+    emit(&config_show_json(&path_text, exists, &rows), json, || {
+        output::config_show(&path_text, exists, &rows)
+    });
     Ok(())
+}
+
+/// The `--json` view of the settings.
+///
+/// `rows` comes from `config::effective`, which has already replaced a stored
+/// token with the mask, so neither view can print one. The JSON carries
+/// `null` next to a `set` flag rather than the mask string: a consumer reads
+/// whether there is a token, never a value it could send anywhere.
+fn config_show_json(path: &str, exists: bool, rows: &[config::Resolved]) -> Value {
+    let mut settings = Map::new();
+    for r in rows {
+        let entry = if r.key.is_secret() {
+            json!({ "value": Value::Null, "set": r.value.is_some(), "source": r.source.label() })
+        } else {
+            json!({ "value": r.value, "source": r.source.label() })
+        };
+        settings.insert(r.key.name().to_string(), entry);
+    }
+    let api_key_set = rows
+        .iter()
+        .any(|r| r.key == Key::ApiKey && r.value.is_some());
+    json!({
+        "path": path,
+        "exists": exists,
+        "api_key_set": api_key_set,
+        "settings": settings,
+    })
 }
 
 pub fn config_path(json: bool) -> Result<()> {
@@ -696,6 +726,38 @@ fn read_markdown(arg: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_json_view_reports_that_a_token_is_set_without_carrying_it() {
+        use crate::config::{Resolved, Source, MASK};
+
+        let row = |key: Key, value: Option<&str>, source: Source| Resolved {
+            key,
+            value: value.map(str::to_string),
+            source,
+        };
+        let rows = [
+            row(Key::Workspace, Some("acme"), Source::File),
+            // Masked by `config::effective` before it ever reaches here.
+            row(Key::ApiKey, Some(MASK), Source::File),
+        ];
+
+        let out = config_show_json("/tmp/plane/config.toml", true, &rows);
+        assert_eq!(out["api_key_set"], json!(true));
+        assert_eq!(out["settings"]["api_key"]["value"], Value::Null);
+        assert_eq!(out["settings"]["api_key"]["set"], json!(true));
+        assert_eq!(out["settings"]["api_key"]["source"], json!("file"));
+        // The mask is a thing to print, not a value to hand a JSON consumer.
+        assert!(!out.to_string().contains(MASK), "{out}");
+        // Ordinary settings still print their value.
+        assert_eq!(out["settings"]["workspace"]["value"], json!("acme"));
+
+        let rows = [row(Key::ApiKey, None, Source::Default)];
+        let out = config_show_json("/tmp/plane/config.toml", true, &rows);
+        assert_eq!(out["api_key_set"], json!(false));
+        assert_eq!(out["settings"]["api_key"]["set"], json!(false));
+        assert_eq!(out["settings"]["api_key"]["value"], Value::Null);
+    }
 
     #[test]
     fn attachment_meta_takes_the_base_name_and_the_extension_mime() {

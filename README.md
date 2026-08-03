@@ -35,9 +35,11 @@ An export only reaches the processes that descend from the shell that ran it.
 | `pass_vault` | `PLANE_PASS_VAULT` | `Personal` |
 | `pass_item` | `PLANE_PASS_ITEM` | `plane` |
 | `pass_field` | `PLANE_PASS_FIELD` | `PAT` |
+| `api_key` | `PLANE_API_KEY` | none; falls back to pass-cli |
 
 Precedence per setting is variable, then file, then default, so `PLANE_API_BASE=... plane project list` still points one call at another instance without touching the file.
-`plane config show` prints the effective value of every setting next to the source it came from (`env`, `file`, `default`, or `unset` for the two keys that have no default and were never set), because a variable shadowing the file is otherwise indistinguishable from a file that was never written.
+`plane config show` prints the effective value of every setting next to the source it came from (`env`, `file`, `default`, or `unset` for a key that has no default and was never set), because a variable shadowing the file is otherwise indistinguishable from a file that was never written.
+`api_key` is the exception to the value column: it prints as `(set)` with its source, in the table and in `--json` alike, so the source stays readable and the token is not.
 
 ```
 plane config set <key> <value>
@@ -56,11 +58,20 @@ Without it the commands work and simply print no `url:` line, which is better th
 
 ## Auth
 
-`PLANE_API_KEY` if set, otherwise the token is read from a Proton Pass entry through [`pass-cli`](https://proton.me/pass).
+Three sources, in order: `PLANE_API_KEY`, then the `api_key` line of the config file, then a Proton Pass entry read through [`pass-cli`](https://proton.me/pass).
 Which entry is configurable through `pass_vault` / `pass_item` / `pass_field`, so nothing about one person's vault layout is baked into the binary.
 
-The token itself is not a setting and `plane config set` refuses to store one: a key name that reads as a credential (`api_key`, `token`, `pat`, ...) is rejected with that reason.
-It is never printed, logged, or written to disk.
+```
+plane config set api_key <a personal access token>
+```
+
+That writes the token in plaintext into a file only your account can read (`0600`, replaced through an atomic rename).
+It exists for a machine with no Proton Pass session, where the alternative is the same token exported from a shell rc file, which is strictly worse: an export is readable in `/proc/<pid>/environ` and leaks into every child process.
+Where pass-cli is set up, prefer it: the token then never touches the disk at all.
+
+The token is never printed back.
+`plane config show` reports it as `(set)` with its source, `--json` carries `"value": null` next to `"set": true`, and `plane config set api_key` echoes the same mask rather than the value it just stored.
+Other credential spellings (`token`, `pat`, `secret`, ...) are not keys, and the error names `api_key` as the one that is.
 
 ## Commands
 
@@ -169,13 +180,13 @@ cargo install --path .
 plane config set workspace acme
 plane config set api_base https://plane.example.com/api/v1
 plane config set web_base https://plane.example.com
-export PLANE_API_KEY=<a personal access token>   # only if pass-cli is not set up here
+plane config set api_key <a personal access token>   # only if pass-cli is not set up here
 
 plane project list
 ```
 
-Auth resolves the same way everywhere: `PLANE_API_KEY` if set, else `pass-cli`.
-A machine with a Proton Pass session set up needs no key variable at all.
+Auth resolves the same way everywhere: `PLANE_API_KEY`, else the stored `api_key`, else `pass-cli`.
+A machine with a Proton Pass session set up needs neither the variable nor the stored key.
 
 Attachments work remotely too: the presigned upload URL is derived from the host the request arrived on, so a remote API base hands back a reachable upload target rather than a `localhost` one only the server could use.
 

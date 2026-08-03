@@ -15,7 +15,7 @@ use std::path::PathBuf;
     name = "plane",
     version,
     about = "CLI for a self-hosted Plane CE instance",
-    after_help = "Settings live in ~/.config/plane/config.toml; see `plane config show`.\nEach one is overridable for a single call by its variable (PLANE_WORKSPACE, PLANE_API_BASE, PLANE_WEB_BASE, PLANE_PASS_*).\nAuth: PLANE_API_KEY, else a PAT read from Proton Pass through pass-cli. The token is never stored in the config file."
+    after_help = "Settings live in ~/.config/plane/config.toml; see `plane config show`.\nEach one is overridable for a single call by its variable (PLANE_WORKSPACE, PLANE_API_BASE, PLANE_WEB_BASE, PLANE_PASS_*).\nAuth: PLANE_API_KEY, else the stored api_key, else a PAT read from Proton Pass through pass-cli."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -57,11 +57,13 @@ enum Commands {
 enum ConfigCmd {
     /// Store a setting, e.g. `plane config set workspace acme`
     Set {
-        /// workspace, api_base, web_base, pass_vault, pass_item, pass_field
+        /// workspace, api_base, web_base, pass_vault, pass_item, pass_field,
+        /// api_key
         key: String,
 
-        /// The value to store. The PAT is not storable: it stays in
-        /// PLANE_API_KEY or in Proton Pass.
+        /// The value to store. A value under `api_key` is a token in
+        /// plaintext, for a machine with no pass-cli; it is never printed
+        /// back.
         value: String,
     },
 

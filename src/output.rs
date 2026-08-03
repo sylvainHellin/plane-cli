@@ -94,6 +94,9 @@ pub fn issue_url(workspace: &str, reference: &str) -> Option<String> {
 /// The effective settings, each with the source it came from. The source
 /// column is the point of the command: a variable shadowing the file is
 /// otherwise indistinguishable from a file that was never written.
+///
+/// Rows arrive from `config::effective`, which has already masked `api_key`,
+/// so this prints `(set)` and the source without ever holding the token.
 pub fn config_show(path: &str, exists: bool, rows: &[Resolved]) -> String {
     let names: Vec<String> = rows.iter().map(|r| r.key.name().to_string()).collect();
     let values: Vec<String> = rows
@@ -115,7 +118,9 @@ pub fn config_show(path: &str, exists: bool, rows: &[Resolved]) -> String {
             r.source_label()
         ));
     }
-    out.push_str("\nauth: PLANE_API_KEY, else pass-cli. The token is never stored in this file.");
+    out.push_str(
+        "\nauth: PLANE_API_KEY, else the stored api_key, else pass-cli. The token itself is never printed.",
+    );
     out
 }
 
@@ -455,6 +460,8 @@ mod tests {
             // No default and never set: the row exists, the value does not.
             row(Key::WebBase, None, Source::Default),
             row(Key::PassField, Some("PAT"), Source::Env),
+            // As `config::effective` hands it over: masked, source intact.
+            row(Key::ApiKey, Some(crate::config::MASK), Source::File),
         ];
 
         let out = config_show("/tmp/plane/config.toml", true, &rows);
@@ -467,8 +474,12 @@ mod tests {
         );
         assert_eq!(lines[3], "web_base    -                             unset");
         assert_eq!(lines[4], "pass_field  PAT                           env");
-        assert_eq!(lines[5], "");
-        assert!(lines[6].contains("The token is never stored in this file."));
+        assert_eq!(lines[5], "api_key     (set)                         file");
+        assert_eq!(lines[6], "");
+        assert!(lines[7].contains("The token itself is never printed."));
+
+        // Whatever a token looks like, no substring of it reaches the table.
+        assert!(!out.contains("plane_pat"), "{out}");
 
         // A file that is not there yet says so, so an all-`default` table
         // does not read as a file that was written and ignored.

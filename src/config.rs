@@ -1,4 +1,4 @@
-//! Persistent configuration, everything except the token.
+//! Persistent configuration.
 //!
 //! Settings live in `$XDG_CONFIG_HOME/plane/config.toml`, falling back to
 //! `~/.config/plane/config.toml`. A file rather than exported variables,
@@ -10,9 +10,13 @@
 //! built-in default. So a one-off `PLANE_API_BASE=... plane project list`
 //! still works without touching the file.
 //!
-//! The PAT is deliberately not a setting. It stays in `PLANE_API_KEY` or in
-//! Proton Pass, and `Key::parse` refuses to name it, so `plane config set`
-//! cannot write a token to disk by accident.
+//! `api_key` is the one setting that holds a credential, for machines with no
+//! Proton Pass session where the alternative is an exported variable in a
+//! shell rc file. It is a plaintext token in a `0600` file written through a
+//! rename, so the file's own guarantees are what protects it, and nothing
+//! that renders a setting is allowed to print it: `effective` hands every
+//! renderer a redacted row (`Resolved::redacted`), which is why `config show`
+//! can report that a token is set without being able to show it.
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -28,6 +32,9 @@ pub const DEFAULT_PASS_FIELD: &str = "PAT";
 /// A configurable setting. Closed on purpose: an unknown key is a typo, and
 /// silently storing it would look like it took effect.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
+// `ApiKey` ends with the enum's name, which clippy flags. Renaming it to
+// `Token` would be the only variant not spelled like the key it stores.
+#[allow(clippy::enum_variant_names)]
 pub enum Key {
     Workspace,
     ApiBase,
@@ -35,17 +42,22 @@ pub enum Key {
     PassVault,
     PassItem,
     PassField,
+    ApiKey,
 }
 
 /// Every key, in the order `config show` prints them.
-pub const KEYS: [Key; 6] = [
+pub const KEYS: [Key; 7] = [
     Key::Workspace,
     Key::ApiBase,
     Key::WebBase,
     Key::PassVault,
     Key::PassItem,
     Key::PassField,
+    Key::ApiKey,
 ];
+
+/// What a credential's value renders as everywhere a value would be printed.
+pub const MASK: &str = "(set)";
 
 impl Key {
     pub fn name(self) -> &'static str {
@@ -56,7 +68,14 @@ impl Key {
             Key::PassVault => "pass_vault",
             Key::PassItem => "pass_item",
             Key::PassField => "pass_field",
+            Key::ApiKey => "api_key",
         }
+    }
+
+    /// Whether the value is a credential rather than a setting, so no output
+    /// path may print it back.
+    pub fn is_secret(self) -> bool {
+        matches!(self, Key::ApiKey)
     }
 
     /// The variable that overrides this key for one invocation.
@@ -68,6 +87,7 @@ impl Key {
             Key::PassVault => "PLANE_PASS_VAULT",
             Key::PassItem => "PLANE_PASS_ITEM",
             Key::PassField => "PLANE_PASS_FIELD",
+            Key::ApiKey => "PLANE_API_KEY",
         }
     }
 
@@ -76,7 +96,9 @@ impl Key {
     /// the API base when a proxy serves them on different hosts.
     pub fn default_value(self) -> Option<&'static str> {
         match self {
-            Key::Workspace | Key::WebBase => None,
+            // A token has no default either: there is nothing to guess, and
+            // an unset one falls through to pass-cli rather than to a value.
+            Key::Workspace | Key::WebBase | Key::ApiKey => None,
             Key::ApiBase => Some(DEFAULT_API_BASE),
             Key::PassVault => Some(DEFAULT_PASS_VAULT),
             Key::PassItem => Some(DEFAULT_PASS_ITEM),
@@ -99,7 +121,7 @@ impl Key {
         let shown = for_error(input);
         if looks_like_a_secret(name) {
             bail!(
-                "`{shown}` looks like a token, and the PAT is never stored in the config file.\nAuth stays out of it: set PLANE_API_KEY for one-off runs, or point `pass_vault` / `pass_item` / `pass_field` at the Proton Pass entry holding the token."
+                "`{shown}` is not a config key. The one credential this file holds is spelled `api_key`: `plane config set api_key <token>` stores it in plaintext for a machine with no pass-cli.\nOtherwise set PLANE_API_KEY for one-off runs, or point `pass_vault` / `pass_item` / `pass_field` at the Proton Pass entry holding the token."
             );
         }
         bail!("Unknown config key `{shown}`. Valid keys: {}.", key_list());
@@ -127,8 +149,8 @@ fn for_error(input: &str) -> String {
 }
 
 /// Whether a rejected key name reads as a credential rather than as a typo,
-/// so the error can say why it is refused instead of just listing the valid
-/// keys and leaving the user to try `pat` next.
+/// so the error can point at the one spelling that is stored (`api_key`)
+/// instead of listing the valid keys and leaving the user to try `pat` next.
 fn looks_like_a_secret(name: &str) -> bool {
     const WORDS: [&str; 6] = ["key", "token", "secret", "password", "credential", "pat"];
     name.split('_').any(|part| WORDS.contains(&part))
@@ -154,6 +176,8 @@ pub struct ConfigFile {
     pub pass_item: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pass_field: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
 }
 
 impl ConfigFile {
@@ -165,6 +189,7 @@ impl ConfigFile {
             Key::PassVault => &mut self.pass_vault,
             Key::PassItem => &mut self.pass_item,
             Key::PassField => &mut self.pass_field,
+            Key::ApiKey => &mut self.api_key,
         }
     }
 
@@ -176,6 +201,7 @@ impl ConfigFile {
             Key::PassVault => &self.pass_vault,
             Key::PassItem => &self.pass_item,
             Key::PassField => &self.pass_field,
+            Key::ApiKey => &self.api_key,
         };
         stored.as_deref().map(str::trim).filter(|v| !v.is_empty())
     }
@@ -219,7 +245,9 @@ impl ConfigFile {
                 .with_context(|| format!("Failed to create {}", parent.display()))?;
         }
         let body = toml::to_string(self).context("Failed to serialize the config")?;
-        let raw = format!("# Written by `plane config set`. The PAT is never stored here.\n{body}");
+        let raw = format!(
+            "# Written by `plane config set`. Kept private (0600): an `api_key` line, when there is one, is a token in plaintext.\n{body}"
+        );
 
         // Written beside the target and renamed over it. A rename within one
         // directory is atomic, so an interrupted write leaves the previous
@@ -335,6 +363,22 @@ impl Resolved {
             self.source.label()
         }
     }
+
+    /// The row with a credential's value replaced by [`MASK`].
+    ///
+    /// Applied once, in `effective`, rather than in each renderer: a row that
+    /// never carries the token cannot leak it through a format string added
+    /// later, and the source still says whether it came from the environment
+    /// or from the file, which is the part worth reading.
+    pub fn redacted(self) -> Resolved {
+        if self.key.is_secret() && self.value.is_some() {
+            return Resolved {
+                value: Some(MASK.to_string()),
+                ..self
+            };
+        }
+        self
+    }
 }
 
 pub fn resolve(key: Key, file: &ConfigFile) -> Resolved {
@@ -368,8 +412,9 @@ fn resolve_with(key: Key, file: &ConfigFile, env: impl Fn(&str) -> Option<String
     }
 }
 
+/// Every setting as `config show` sees it, credentials already redacted.
 pub fn effective(file: &ConfigFile) -> Vec<Resolved> {
-    KEYS.iter().map(|k| resolve(*k, file)).collect()
+    KEYS.iter().map(|k| resolve(*k, file).redacted()).collect()
 }
 
 pub fn path() -> Result<PathBuf> {
@@ -423,6 +468,15 @@ pub fn api_base() -> Result<String> {
 pub fn web_base() -> Option<String> {
     let file = loaded().ok()?;
     resolve(Key::WebBase, file).value
+}
+
+/// The token stored in the file, if there is one.
+///
+/// The file only, not the resolved value: `auth` reads `PLANE_API_KEY`
+/// itself, before anything touches the file, so a token in the environment
+/// keeps working on a machine whose config file is malformed.
+pub fn stored_api_key() -> Option<String> {
+    loaded().ok()?.get(Key::ApiKey).map(str::to_string)
 }
 
 /// Where in Proton Pass the token lives, as vault, item, field.
@@ -524,26 +578,83 @@ mod tests {
     }
 
     #[test]
-    fn a_key_that_names_a_token_is_refused_with_the_reason() {
+    fn another_spelling_of_the_token_is_refused_and_pointed_at_api_key() {
+        // `api_key` is a real key now, so these are near misses rather than
+        // attempts at something the file refuses to hold: the error has to
+        // name the spelling that works instead of listing six unrelated keys.
         for attempt in [
-            "api_key",
             "apikey",
-            "PLANE_API_KEY",
             "pat",
             "token",
             "auth-token",
-            "api.key",
             "secret",
             "password",
             "credential",
         ] {
             let err = Key::parse(attempt).unwrap_err().to_string();
-            assert!(
-                err.contains("never stored in the config file"),
-                "{attempt}: {err}"
-            );
+            assert!(err.contains("`api_key`"), "{attempt}: {err}");
             assert!(err.contains("PLANE_API_KEY"), "{attempt}: {err}");
         }
+    }
+
+    #[test]
+    fn the_token_key_parses_in_every_spelling_and_is_marked_secret() {
+        for spelling in [
+            "api_key",
+            "api-key",
+            "api.key",
+            " API_KEY ",
+            "PLANE_API_KEY",
+        ] {
+            assert_eq!(Key::parse(spelling).unwrap(), Key::ApiKey, "{spelling}");
+        }
+        assert!(Key::ApiKey.is_secret());
+        assert_eq!(Key::ApiKey.env(), "PLANE_API_KEY");
+        // No default: an unset token falls through to pass-cli, not to a value.
+        assert_eq!(Key::ApiKey.default_value(), None);
+        for key in KEYS.iter().filter(|k| **k != Key::ApiKey) {
+            assert!(!key.is_secret(), "{}", key.name());
+        }
+    }
+
+    #[test]
+    fn the_token_round_trips_through_the_file_but_never_through_a_rendered_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        let mut file = ConfigFile::default();
+        file.set(Key::ApiKey, "plane_pat_abcdef123456").unwrap();
+        file.save_to(&path).unwrap();
+        let reread = ConfigFile::load_from(&path).unwrap();
+        assert_eq!(reread.get(Key::ApiKey), Some("plane_pat_abcdef123456"));
+
+        // Every renderer reads `effective`, and what it hands back is masked.
+        let row = |rows: &[Resolved]| rows.iter().find(|r| r.key == Key::ApiKey).unwrap().clone();
+        let shown = row(&effective(&reread));
+        assert_eq!(shown.value.as_deref(), Some(MASK));
+        assert_eq!(shown.source_label(), "file");
+
+        // The environment shadows it, and the row says so without a value.
+        let from_env = resolve_with(
+            Key::ApiKey,
+            &reread,
+            env_of(&[("PLANE_API_KEY", "plane_pat_from_the_environment")]),
+        )
+        .redacted();
+        assert_eq!(from_env.value.as_deref(), Some(MASK));
+        assert_eq!(from_env.source_label(), "env");
+
+        // Unset is unset, not a mask over nothing.
+        let mut file = reread;
+        assert!(file.unset(Key::ApiKey));
+        file.save_to(&path).unwrap();
+        let reread = ConfigFile::load_from(&path).unwrap();
+        assert_eq!(reread.get(Key::ApiKey), None);
+        let shown = row(&effective(&reread));
+        assert_eq!(shown.value, None);
+        assert_eq!(shown.source_label(), "unset");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("plane_pat_"), "{raw}");
     }
 
     #[test]
@@ -596,9 +707,10 @@ mod tests {
         assert_eq!(reread, file);
         assert_eq!(reread.get(Key::Workspace), Some("acme"));
 
-        // The token never reaches the file, so nothing in it can look like one.
+        // Nothing writes a key that was not set, least of all the one that
+        // would hold a token.
         let raw = std::fs::read_to_string(&path).unwrap();
-        assert!(!raw.contains("api_key"), "{raw}");
+        assert!(!raw.contains("api_key = "), "{raw}");
 
         #[cfg(unix)]
         {
