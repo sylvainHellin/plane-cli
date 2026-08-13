@@ -78,9 +78,9 @@ Other credential spellings (`token`, `pat`, `secret`, ...) are not keys, and the
 ```
 plane issue get RES-12
 plane issue list RES [--state todo] [--module "Paper 2 Drawings"] [--label deep]
-plane issue create RES "title" [--module M] [--state S] [--priority P] [--due YYYY-MM-DD] [--label L ...] [--desc-md -]
+plane issue create RES "title" [--module M] [--state S] [--priority P] [--due YYYY-MM-DD] [--label L ...] [--assignee P ...] [--desc-md -]
 plane issue create --from-note <note.md> "title" [...]
-plane issue update RES-12 [--state|--priority|--due|--title|--module|--label]
+plane issue update RES-12 [--state|--priority|--due|--title|--module|--label|--assignee]
 plane issue comment RES-12 "text"
 plane issue attach RES-12 <file> [<file> ...]
 plane issue attachments RES-12
@@ -114,6 +114,22 @@ On `update` it **replaces** the issue's label set rather than adding to it, beca
 So every label an issue should end up with goes into the same invocation, and dropping all labels is not expressible through this flag today.
 
 Labels are per project, so the same four names exist once per board as four different UUIDs; `plane label list RES` prints the ones that project really has.
+
+### Assignees
+
+`--assignee` is repeatable on `create` and `update` and takes a person, not a UUID: a first name, display name, email, or "First Last", matched case-insensitively against the project's members (exact first, then a unique substring).
+
+```
+plane issue update RES-12 --assignee Robin --assignee sylvain
+plane issue update RES-12 --assignee none        # clear every assignee
+```
+
+Only project members are assignable, because that is the set Plane offers in its own assignee dropdown and the only set the `assignees` write accepts; a workspace member who was never added to the project errors here with the roster until they are added.
+A person the CLI cannot resolve, or one that matches two members, is an error rather than a silent miss.
+
+Like `--label`, `update` **replaces** the assignee set rather than adding to it, so every assignee goes in one invocation.
+The empty set is the one thing a name list cannot spell, so a single `--assignee none` expresses it and clears the field.
+Issue reads (`get`, and the re-read after `update`) show an `assigned:` line, resolved to first names through `?expand=assignees`.
 
 ### Attachments
 
@@ -165,6 +181,7 @@ Everything below was verified against a running CE instance and is encoded once 
 | an issue's module lives in a join table | `--module` is a second call, and the issue record keeps reporting `"module": null` |
 | `labels` is the write field, and `label_ids` is accepted and ignored | `--label` writes `labels`; the plausible-looking spelling silently loses the labels |
 | `labels` replaces the whole set on a PATCH | `--label` is documented as replacing, not appending |
+| only project members are assignable, and `assignees` takes their user UUIDs | `--assignee` resolves a name against `projects/<id>/members/`, and `?expand=assignees` reads them back |
 | attachments live under `work-items/`, not `issues/` | the `issues/` spelling 404s, while issue CRUD and comments need `issues/` |
 | the presigned upload host follows the API host | attaching works remotely, not only from the server itself |
 | 60 requests per minute per PAT | a 429 says so instead of surfacing a bare status code |
