@@ -201,7 +201,7 @@ impl Client {
     pub fn issue_by_ref(&self, r: &IssueRef) -> Result<Value> {
         self.get(
             &format!("issues/{}/", r.as_str()),
-            &[("expand", "state,labels")],
+            &[("expand", "state,labels,assignees")],
         )
         .with_context(|| format!("Could not resolve issue {}", r.as_str()))
     }
@@ -443,6 +443,37 @@ impl Client {
         let labels = self.labels(project_id)?;
         resolve_all(&labels, names, "label")
     }
+
+    /// The people who can be assigned an issue: a project's members. Plane
+    /// only offers project members in an assignee dropdown, and the API only
+    /// accepts their UUIDs in `assignees`, so a workspace member who was never
+    /// added to the project is not assignable until they are.
+    ///
+    /// This endpoint answers a bare array of user objects (`id`, `first_name`,
+    /// `display_name`, `email`), not the envelope the issue lists use.
+    pub fn members(&self, project_id: &str) -> Result<Vec<Value>> {
+        self.get_all(&format!("projects/{project_id}/members/"), &[])
+    }
+
+    /// Resolve people to their member UUIDs in a single fetch, since the
+    /// `assignees` write carries the whole set. Deduplicated, in the order
+    /// asked for. A person is matched by display name, email, first name, or
+    /// "First Last", case-insensitively: exact first, then a unique substring.
+    pub fn find_members(&self, project_id: &str, names: &[String]) -> Result<Vec<Value>> {
+        let members = self.members(project_id)?;
+        let mut out: Vec<Value> = Vec::new();
+        for name in names {
+            let found = find_member(&members, name)?.clone();
+            let id = found.get("id").and_then(Value::as_str).unwrap_or_default();
+            let already = out
+                .iter()
+                .any(|v| v.get("id").and_then(Value::as_str).unwrap_or_default() == id);
+            if !already {
+                out.push(found);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// Match every requested name against `items`, erroring on the first miss.
@@ -481,6 +512,92 @@ fn no_such_name(kind: &str, name: &str, items: &[Value]) -> anyhow::Error {
         available.join(", ")
     };
     anyhow!("No {kind} named \"{name}\" in this project. Available: {available}")
+}
+
+/// The strings a person can be named by: display name, email, first name,
+/// and "First Last". Empty ones are dropped so a member with no last name
+/// never matches the empty query.
+fn member_labels(m: &Value) -> Vec<String> {
+    let g = |k: &str| {
+        m.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string()
+    };
+    let first = g("first_name");
+    let last = g("last_name");
+    let full = format!("{first} {last}").trim().to_string();
+    let mut v = vec![g("display_name"), g("email"), first.clone()];
+    if !full.is_empty() && full != first {
+        v.push(full);
+    }
+    v.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
+/// How a project member reads in an error: `First (display_name)`.
+fn member_desc(m: &Value) -> String {
+    let g = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").trim();
+    let first = g("first_name");
+    let display = g("display_name");
+    match (first.is_empty(), display.is_empty()) {
+        (false, false) => format!("{first} ({display})"),
+        (false, true) => first.to_string(),
+        (true, false) => display.to_string(),
+        (true, true) => g("email").to_string(),
+    }
+}
+
+/// Match one person against a project's members: exact on any of their names
+/// first, then a unique case-insensitive substring. Ambiguity and no-match
+/// both fail loudly with the roster, because a silently wrong assignee is
+/// worse than a stop.
+fn find_member<'a>(members: &'a [Value], name: &str) -> Result<&'a Value> {
+    let wanted = name.trim().to_lowercase();
+    if wanted.is_empty() {
+        bail!("An empty assignee name matches no one.");
+    }
+    let roster = || {
+        let names: Vec<String> = members.iter().map(member_desc).collect();
+        if names.is_empty() {
+            "none".to_string()
+        } else {
+            names.join(", ")
+        }
+    };
+
+    let exact: Vec<&Value> = members
+        .iter()
+        .filter(|m| member_labels(m).iter().any(|l| l.to_lowercase() == wanted))
+        .collect();
+    match exact.len() {
+        1 => return Ok(exact[0]),
+        n if n > 1 => bail!(
+            "\"{name}\" matches {n} project members exactly. Use a fuller name. Members: {}",
+            roster()
+        ),
+        _ => {}
+    }
+
+    let sub: Vec<&Value> = members
+        .iter()
+        .filter(|m| {
+            member_labels(m)
+                .iter()
+                .any(|l| l.to_lowercase().contains(&wanted))
+        })
+        .collect();
+    match sub.len() {
+        1 => Ok(sub[0]),
+        0 => bail!(
+            "No project member matches \"{name}\". A workspace member has to be added to the project before they can be assigned. Members: {}",
+            roster()
+        ),
+        n => bail!(
+            "\"{name}\" matches {n} project members ({}). Be more specific.",
+            sub.iter().map(|m| member_desc(m)).collect::<Vec<_>>().join(", ")
+        ),
+    }
 }
 
 /// Decide the cursor for the next page, or `None` when the list is done.
@@ -626,6 +743,34 @@ mod tests {
     fn priority_is_validated() {
         assert_eq!(normalize_priority("HIGH").unwrap(), "high");
         assert!(normalize_priority("important").is_err());
+    }
+
+    #[test]
+    fn a_member_is_found_by_first_name_display_name_or_email() {
+        let members = vec![
+            json!({"id": "r", "first_name": "Robin", "last_name": "", "display_name": "sylvain.s.personal.assistant", "email": "sylvain.s.personal.assistant@gmail.com"}),
+            json!({"id": "s", "first_name": "sylvain", "last_name": "hellin", "display_name": "plane.sincere", "email": "plane.sincere@alias.hellin.me"}),
+        ];
+        // First name is the ergonomic handle when display names are ugly.
+        assert_eq!(find_member(&members, "Robin").unwrap()["id"], "r");
+        assert_eq!(find_member(&members, "sylvain").unwrap()["id"], "s");
+        // Display name and email resolve too, case-insensitively.
+        assert_eq!(find_member(&members, "PLANE.SINCERE").unwrap()["id"], "s");
+        assert_eq!(
+            find_member(&members, "sylvain.s.personal.assistant@gmail.com").unwrap()["id"],
+            "r"
+        );
+        // "First Last" resolves.
+        assert_eq!(find_member(&members, "sylvain hellin").unwrap()["id"], "s");
+    }
+
+    #[test]
+    fn an_unknown_or_non_member_assignee_fails_with_the_roster() {
+        let members =
+            vec![json!({"id": "s", "first_name": "sylvain", "last_name": "hellin", "display_name": "plane.sincere", "email": "x@y.z"})];
+        let err = find_member(&members, "Robin").unwrap_err().to_string();
+        assert!(err.contains("added to the project"), "{err}");
+        assert!(err.contains("sylvain"), "{err}");
     }
 
     #[test]

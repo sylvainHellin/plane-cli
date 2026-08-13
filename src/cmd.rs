@@ -265,6 +265,7 @@ pub struct CreateArgs {
     pub due: Option<String>,
     pub desc_md: Option<String>,
     pub labels: Vec<String>,
+    pub assignees: Vec<String>,
     pub json: bool,
 }
 
@@ -321,6 +322,10 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
         true => None,
         false => Some(resolve_label_ids(&c, &project_id, &args.labels)?),
     };
+    let assignee_ids = match args.assignees.is_empty() {
+        true => None,
+        false => Some(resolve_assignee_ids(&c, &project_id, &args.assignees)?),
+    };
     let body = write_body(IssueFields {
         name: Some(title.clone()),
         description_html: match &args.desc_md {
@@ -340,6 +345,7 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
             None => None,
         },
         label_ids: label_ids.clone(),
+        assignee_ids,
     });
 
     let created = c.create_issue(&project_id, &Value::Object(body))?;
@@ -427,6 +433,7 @@ struct IssueFields {
     priority: Option<String>,
     target_date: Option<String>,
     label_ids: Option<Vec<String>>,
+    assignee_ids: Option<Vec<String>>,
 }
 
 /// Assemble an issue write body. Pure, and separate from the request, so the
@@ -455,6 +462,9 @@ fn write_body(f: IssueFields) -> Map<String, Value> {
     if let Some(v) = f.label_ids {
         body.insert("labels".into(), json!(v));
     }
+    if let Some(v) = f.assignee_ids {
+        body.insert("assignees".into(), json!(v));
+    }
     body
 }
 
@@ -476,6 +486,29 @@ fn resolve_label_ids(c: &Client, project_id: &str, names: &[String]) -> Result<V
         .collect()
 }
 
+/// Resolve people to the member UUIDs the `assignees` write takes, in one
+/// fetch. The whole set is written, mirroring `--label`, so a second call is a
+/// fresh list rather than an addition. A single `--assignee none` clears every
+/// assignee: it writes the empty array, which is the one thing a name list
+/// cannot otherwise express.
+fn resolve_assignee_ids(c: &Client, project_id: &str, names: &[String]) -> Result<Vec<String>> {
+    if names.len() == 1 {
+        let sole = names[0].trim().trim_start_matches('@').to_lowercase();
+        if sole == "none" {
+            return Ok(Vec::new());
+        }
+    }
+    c.find_members(project_id, names)?
+        .iter()
+        .map(|m| {
+            m.get("id")
+                .and_then(Value::as_str)
+                .map(String::from)
+                .ok_or_else(|| anyhow!("Member \"{}\" has no id", field(m, "display_name")))
+        })
+        .collect()
+}
+
 pub struct UpdateArgs {
     pub reference: String,
     pub state: Option<String>,
@@ -484,6 +517,7 @@ pub struct UpdateArgs {
     pub title: Option<String>,
     pub module: Option<String>,
     pub labels: Vec<String>,
+    pub assignees: Vec<String>,
     pub json: bool,
 }
 
@@ -494,8 +528,9 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
         && args.title.is_none()
         && args.module.is_none()
         && args.labels.is_empty()
+        && args.assignees.is_empty()
     {
-        bail!("Nothing to update. Pass at least one of --state, --priority, --due, --title, --module, --label.");
+        bail!("Nothing to update. Pass at least one of --state, --priority, --due, --title, --module, --label, --assignee.");
     }
 
     let c = Client::new()?;
@@ -525,6 +560,10 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
         label_ids: match args.labels.is_empty() {
             true => None,
             false => Some(resolve_label_ids(&c, &project_id, &args.labels)?),
+        },
+        assignee_ids: match args.assignees.is_empty() {
+            true => None,
+            false => Some(resolve_assignee_ids(&c, &project_id, &args.assignees)?),
         },
         ..IssueFields::default()
     });

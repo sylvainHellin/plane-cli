@@ -141,6 +141,11 @@ enum IssueCmd {
         /// Label to set, by name. Repeatable.
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
+
+        /// Assign to a project member, by first name, display name, or email.
+        /// Repeatable. Only project members are assignable.
+        #[arg(long = "assignee", value_name = "PERSON")]
+        assignees: Vec<String>,
     },
 
     /// Update an issue. Closing one is `--state done`.
@@ -172,6 +177,12 @@ enum IssueCmd {
         /// current labels rather than adding to them.
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
+
+        /// Assignee to set, by first name, display name, or email. Repeatable,
+        /// and replaces the issue's assignees rather than adding. A single
+        /// `--assignee none` clears them.
+        #[arg(long = "assignee", value_name = "PERSON")]
+        assignees: Vec<String>,
     },
 
     /// Comment on an issue
@@ -262,6 +273,7 @@ fn main() {
                 due,
                 desc_md,
                 labels,
+                assignees,
             } => cmd::issue_create(cmd::CreateArgs {
                 project,
                 title,
@@ -272,6 +284,7 @@ fn main() {
                 due,
                 desc_md,
                 labels,
+                assignees,
                 json,
             }),
             IssueCmd::Update {
@@ -282,6 +295,7 @@ fn main() {
                 title,
                 module,
                 labels,
+                assignees,
             } => cmd::issue_update(cmd::UpdateArgs {
                 reference,
                 state,
@@ -290,6 +304,7 @@ fn main() {
                 title,
                 module,
                 labels,
+                assignees,
                 json,
             }),
             IssueCmd::Comment { reference, text } => cmd::issue_comment(&reference, &text, json),
@@ -383,6 +398,31 @@ mod tests {
         match cli.command {
             Commands::Issue(IssueCmd::Create { labels, .. }) => {
                 assert_eq!(labels, vec!["quick".to_string()]);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn assignee_is_repeatable_on_create_and_update() {
+        let cli = Cli::try_parse_from([
+            "plane", "issue", "update", "RES-50", "--assignee", "Robin", "--assignee", "sylvain",
+        ])
+        .unwrap();
+        match cli.command {
+            // The whole set is written in one array, like labels, so both
+            // must survive parsing or one assignee is silently dropped.
+            Commands::Issue(IssueCmd::Update { assignees, .. }) => {
+                assert_eq!(assignees, vec!["Robin".to_string(), "sylvain".to_string()]);
+            }
+            _ => panic!("wrong command"),
+        }
+        let cli =
+            Cli::try_parse_from(["plane", "issue", "create", "RES", "T", "--assignee", "Robin"])
+                .unwrap();
+        match cli.command {
+            Commands::Issue(IssueCmd::Create { assignees, .. }) => {
+                assert_eq!(assignees, vec!["Robin".to_string()]);
             }
             _ => panic!("wrong command"),
         }

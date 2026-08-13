@@ -1,6 +1,7 @@
 /target
 /.agents/
 /.pi-subagents/
+/.pi/
 /.nvim/
 /PLANE-CLI-PLAN.md
 *.swp

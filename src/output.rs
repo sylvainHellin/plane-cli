@@ -68,6 +68,28 @@ pub fn label_names(issue: &Value) -> Vec<&str> {
         .unwrap_or_default()
 }
 
+/// The people an issue is assigned to, from `?expand=assignees`. First name
+/// where there is one, else display name: the first name is what a person
+/// recognises, the display name is the fallback identifier.
+pub fn assignee_names(issue: &Value) -> Vec<&str> {
+    issue
+        .get("assignees")
+        .and_then(Value::as_array)
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|a| {
+                    let first = a.get("first_name").and_then(Value::as_str).unwrap_or("");
+                    if !first.is_empty() {
+                        Some(first)
+                    } else {
+                        a.get("display_name").and_then(Value::as_str)
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn dash(s: &str) -> &str {
     if s.is_empty() {
         "-"
@@ -140,6 +162,15 @@ pub fn issue_detail(issue: &Value, reference: &str, workspace: &str) -> String {
             "-".to_string()
         } else {
             labels.join(", ")
+        }
+    ));
+    let assignees = assignee_names(issue);
+    out.push_str(&format!(
+        "  assigned: {}\n",
+        if assignees.is_empty() {
+            "-".to_string()
+        } else {
+            assignees.join(", ")
         }
     ));
     if let Some(url) = issue_url(workspace, reference) {
@@ -406,6 +437,20 @@ mod tests {
         assert!(out.contains("priority: -"));
         assert!(out.contains("due:      -"));
         assert!(out.contains("labels:   -"));
+        assert!(out.contains("assigned: -"));
+    }
+
+    #[test]
+    fn assignees_render_by_first_name_from_the_expand() {
+        let issue = json!({
+            "name": "T", "sequence_id": 1, "state": {"name": "Todo"},
+            "assignees": [
+                {"first_name": "Robin", "display_name": "sylvain.s.personal.assistant"},
+                {"first_name": "", "display_name": "plane.sincere"},
+            ]
+        });
+        let out = issue_detail(&issue, "RES-1", "acme");
+        assert!(out.contains("assigned: Robin, plane.sincere"), "{out}");
     }
 
     #[test]
