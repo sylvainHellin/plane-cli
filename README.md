@@ -93,7 +93,8 @@ plane config set|unset|show|path
 
 `--json` is global, so `plane issue get RES-12 --json | jq -r .name` works on every command.
 Single-object commands print the API body as it came back.
-List commands print `{count, results}` with every page merged into `results`, because a list is fetched across as many pages as the cursor takes and no single raw body exists to print.
+List commands print a bare JSON array with every page already merged into it, so `jq '.[]'` walks a list the same way `jq .name` reads a single object.
+There is no `{count, results}` envelope to unwrap: a list is fetched across as many pages as the cursor takes, so no single raw body exists to print anyway, and `jq 'length'` gives the count.
 
 Closing a ticket is `plane issue update RES-12 --state done`.
 There is no `close` subcommand: it would be pure shorthand for that one flag, and the GUI gesture it mirrors is also just setting the status.

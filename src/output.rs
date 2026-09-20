@@ -1,7 +1,9 @@
 //! Rendering. Compact aligned lines by default, raw API body under `--json`.
 //!
-//! `--json` prints exactly what Plane answered, so anything this module
-//! chooses not to show is still one flag away.
+//! `--json` prints the API body as it came back, so anything this module
+//! chooses not to show is still one flag away. A list prints as a bare array
+//! of those bodies, every page already merged, so `jq '.[]'` walks it the
+//! same way it walks a single object fetched with `get`.
 
 use anyhow::{anyhow, Result};
 use serde_json::Value;

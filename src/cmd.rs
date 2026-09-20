@@ -192,11 +192,9 @@ pub fn issue_list(
 
     issues.sort_by_key(|i| i.get("sequence_id").and_then(Value::as_i64).unwrap_or(0));
 
-    emit(
-        &json!({ "count": issues.len(), "results": issues }),
-        json,
-        || output::issue_list(&issues, &identifier, &heading),
-    );
+    emit(&json!(issues), json, || {
+        output::issue_list(&issues, &identifier, &heading)
+    });
     Ok(())
 }
 
@@ -204,11 +202,7 @@ pub fn project_list(json: bool) -> Result<()> {
     let c = Client::new()?;
     let mut projects = c.projects()?;
     projects.sort_by_key(|p| field(p, "identifier").to_string());
-    emit(
-        &json!({ "count": projects.len(), "results": projects }),
-        json,
-        || output::project_list(&projects),
-    );
+    emit(&json!(projects), json, || output::project_list(&projects));
     Ok(())
 }
 
@@ -218,11 +212,9 @@ pub fn module_list(project: &str, json: bool) -> Result<()> {
     let identifier = field(&proj, "identifier").to_string();
     let mut modules = c.modules(field(&proj, "id"))?;
     modules.sort_by_key(|m| field(m, "name").to_lowercase());
-    emit(
-        &json!({ "count": modules.len(), "results": modules }),
-        json,
-        || output::module_list(&modules, &identifier),
-    );
+    emit(&json!(modules), json, || {
+        output::module_list(&modules, &identifier)
+    });
     Ok(())
 }
 
@@ -232,11 +224,9 @@ pub fn label_list(project: &str, json: bool) -> Result<()> {
     let identifier = field(&proj, "identifier").to_string();
     let mut labels = c.labels(field(&proj, "id"))?;
     labels.sort_by_key(|l| field(l, "name").to_lowercase());
-    emit(
-        &json!({ "count": labels.len(), "results": labels }),
-        json,
-        || output::label_list(&labels, &identifier),
-    );
+    emit(&json!(labels), json, || {
+        output::label_list(&labels, &identifier)
+    });
     Ok(())
 }
 
@@ -245,11 +235,9 @@ pub fn state_list(project: &str, json: bool) -> Result<()> {
     let proj = c.project_by_identifier(project)?;
     let identifier = field(&proj, "identifier").to_string();
     let states = c.states(field(&proj, "id"))?;
-    emit(
-        &json!({ "count": states.len(), "results": states }),
-        json,
-        || output::state_list(&states, &identifier),
-    );
+    emit(&json!(states), json, || {
+        output::state_list(&states, &identifier)
+    });
     Ok(())
 }
 
@@ -647,13 +635,9 @@ pub fn issue_attach(reference: &str, files: &[PathBuf], json: bool) -> Result<()
         }
     }
 
-    // The human lines are already out; only the envelope is left to print.
+    // The human lines are already out; only the JSON array is left to print.
     if json {
-        emit(
-            &json!({ "count": done.len(), "results": done }),
-            true,
-            String::new,
-        );
+        emit(&json!(done), true, String::new);
     }
     Ok(())
 }
@@ -716,11 +700,9 @@ pub fn issue_attachments(reference: &str, json: bool) -> Result<()> {
         required_field(&issue, "id", r.as_str())?,
     )?;
     attachments.sort_by_key(|a| field(a, "created_at").to_string());
-    emit(
-        &json!({ "count": attachments.len(), "results": attachments }),
-        json,
-        || output::attachment_list(&attachments, r.as_str()),
-    );
+    emit(&json!(attachments), json, || {
+        output::attachment_list(&attachments, r.as_str())
+    });
     Ok(())
 }
 
