@@ -766,8 +766,9 @@ mod tests {
 
     #[test]
     fn an_unknown_or_non_member_assignee_fails_with_the_roster() {
-        let members =
-            vec![json!({"id": "s", "first_name": "sylvain", "last_name": "hellin", "display_name": "plane.sincere", "email": "x@y.z"})];
+        let members = vec![
+            json!({"id": "s", "first_name": "sylvain", "last_name": "hellin", "display_name": "plane.sincere", "email": "x@y.z"}),
+        ];
         let err = find_member(&members, "Robin").unwrap_err().to_string();
         assert!(err.contains("added to the project"), "{err}");
         assert!(err.contains("sylvain"), "{err}");

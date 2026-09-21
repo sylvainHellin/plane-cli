@@ -406,7 +406,14 @@ mod tests {
     #[test]
     fn assignee_is_repeatable_on_create_and_update() {
         let cli = Cli::try_parse_from([
-            "plane", "issue", "update", "RES-50", "--assignee", "Robin", "--assignee", "sylvain",
+            "plane",
+            "issue",
+            "update",
+            "RES-50",
+            "--assignee",
+            "Robin",
+            "--assignee",
+            "sylvain",
         ])
         .unwrap();
         match cli.command {
@@ -417,9 +424,16 @@ mod tests {
             }
             _ => panic!("wrong command"),
         }
-        let cli =
-            Cli::try_parse_from(["plane", "issue", "create", "RES", "T", "--assignee", "Robin"])
-                .unwrap();
+        let cli = Cli::try_parse_from([
+            "plane",
+            "issue",
+            "create",
+            "RES",
+            "T",
+            "--assignee",
+            "Robin",
+        ])
+        .unwrap();
         match cli.command {
             Commands::Issue(IssueCmd::Create { assignees, .. }) => {
                 assert_eq!(assignees, vec!["Robin".to_string()]);
