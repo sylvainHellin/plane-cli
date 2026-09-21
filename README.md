@@ -23,7 +23,17 @@ make check
 ```
 
 Formatting, lints, and tests, in that order: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
-Run it before every commit; `make fmt` reformats the tree when `fmt-check` complains.
+`make fmt` reformats the tree when `fmt-check` complains.
+
+Two things enforce it rather than trusting memory.
+A tracked pre-commit hook runs `cargo fmt --check` and refuses the commit when the tree is unformatted; it stops there because clippy and the tests compile the crate, which is too slow to pay on every commit.
+GitHub Actions runs the whole `make check` on every push and pull request (`.github/workflows/ci.yml`), so the lints and the tests are enforced there.
+
+A fresh clone has to point git at the tracked hooks once, since `core.hooksPath` is per clone and not carried by the repository:
+
+```
+git config core.hooksPath hooks
+```
 
 ## Configuration
 

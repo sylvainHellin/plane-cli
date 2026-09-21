@@ -1,0 +1,21 @@
+name: check
+
+# Quoted, because a bare `on` is the YAML 1.1 boolean `true` to every parser
+# but GitHub's own.
+"on":
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: make check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # Installs the stable toolchain and caches the cargo registry and the
+      # target directory (Swatinem/rust-cache is built in and on by default).
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - run: make check

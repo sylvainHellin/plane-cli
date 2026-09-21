@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Pre-commit gate: formatting only.
+#
+# `cargo fmt --check` reads the tree and answers in well under a second, so it
+# is cheap enough to run on every commit, and unformatted code is the one
+# failure that keeps coming back.
+#
+# `cargo clippy --all-targets -- -D warnings` and `cargo test` are deliberately
+# NOT here: both compile the crate and its dev-dependencies, which costs tens of
+# seconds on a cold target directory and would turn every commit into a wait.
+# CI (.github/workflows/ci.yml) runs the full `make check` on every push and
+# pull request, so they are enforced there instead. Run `make check` yourself
+# before pushing if you would rather not learn it from CI.
+set -euo pipefail
+
+if ! command -v cargo >/dev/null 2>&1; then
+	echo "pre-commit: cargo not found in PATH, skipping the formatting check." >&2
+	exit 0
+fi
+
+if ! cargo fmt --check; then
+	echo >&2
+	echo "pre-commit: the tree is not formatted (hunks above)." >&2
+	echo "Fix it with:  make fmt" >&2
+	echo "Then stage the reformatted files and commit again." >&2
+	exit 1
+fi
