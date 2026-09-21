@@ -318,22 +318,18 @@ pub fn attachment_list(attachments: &[Value], reference: &str) -> String {
     }
     let names: Vec<String> = attachments
         .iter()
-        .map(|a| attachment_name(a).to_string())
+        .map(|a| {
+            let n = attachment_name(a);
+            if n.is_empty() { "?" } else { n }.to_string()
+        })
         .collect();
     let sizes: Vec<String> = attachments
         .iter()
-        .map(|a| human_size(a.get("size").and_then(Value::as_f64).unwrap_or(0.0)))
+        .map(|a| human_size(attachment_size(a) as f64))
         .collect();
     let types: Vec<String> = attachments
         .iter()
-        .map(|a| {
-            dash(
-                a.get("attributes")
-                    .map(|at| field(at, "type"))
-                    .unwrap_or(""),
-            )
-            .to_string()
-        })
+        .map(|a| dash(attachment_type(a)).to_string())
         .collect();
     let (nw, sw, tw) = (width(&names), width(&sizes), width(&types));
 
@@ -358,12 +354,69 @@ pub fn attachment_list(attachments: &[Value], reference: &str) -> String {
 }
 
 /// The stored file name of an attachment, which lives under `attributes`.
+/// Empty when the raw asset carries neither the attributes object nor a name
+/// in it; the table prints `?` for that, the JSON prints the empty string.
 pub fn attachment_name(attachment: &Value) -> &str {
     attachment
         .get("attributes")
         .map(|at| field(at, "name"))
-        .filter(|n| !n.is_empty())
-        .unwrap_or("?")
+        .unwrap_or("")
+}
+
+/// The MIME type of an attachment, which also lives under `attributes`.
+pub fn attachment_type(attachment: &Value) -> &str {
+    attachment
+        .get("attributes")
+        .map(|at| field(at, "type"))
+        .unwrap_or("")
+}
+
+/// The byte count of an attachment, as an integer.
+///
+/// CE reports the top-level `size` as a float (`70.0`) and the one under
+/// `attributes` as an integer, and a byte count is not a fractional quantity,
+/// so both commands emit the integer. A negative or absent value reads as 0
+/// rather than panicking on a cast.
+pub fn attachment_size(attachment: &Value) -> u64 {
+    [
+        attachment.get("size"),
+        attachment.get("attributes").and_then(|at| at.get("size")),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|v| {
+        v.as_u64()
+            .or_else(|| v.as_f64().map(|f| f.max(0.0).round() as u64))
+    })
+    .unwrap_or(0)
+}
+
+/// The flat JSON shape both attachment commands emit: `id`, `name`, `size`,
+/// `type`, `asset_url`, in that order.
+///
+/// `attach` knows all five from the upload it just performed; `attachments`
+/// digs them out of Plane's raw asset object through [`attachment_flat`].
+/// One constructor, so the two shapes cannot drift apart again.
+pub fn attachment_entry(id: &str, name: &str, size: u64, mime: &str, asset_url: Value) -> Value {
+    serde_json::json!({
+        "id": id,
+        "name": name,
+        "size": size,
+        "type": mime,
+        "asset_url": asset_url,
+    })
+}
+
+/// Flatten one of Plane's raw asset objects into that shape. The raw object
+/// carries no `asset_url`, so the caller passes the one it derived.
+pub fn attachment_flat(asset: &Value, asset_url: Value) -> Value {
+    attachment_entry(
+        field(asset, "id"),
+        attachment_name(asset),
+        attachment_size(asset),
+        attachment_type(asset),
+        asset_url,
+    )
 }
 
 pub fn state_list(states: &[Value], identifier: &str) -> String {
@@ -486,6 +539,35 @@ mod tests {
             lines[2]
         );
         assert_eq!(attachment_list(&[], "RES-50"), "RES-50: no attachments");
+    }
+
+    #[test]
+    fn attach_and_attachments_emit_the_same_flat_json_shape() {
+        let url = "/api/assets/v2/workspaces/acme/projects/p1/issues/i1/attachments/a1/";
+        // What `attach --json` builds from the upload it just performed.
+        let attached = attachment_entry("a1", "plan.pdf", 32, "application/pdf", json!(url));
+        // What `attachments --json` flattens out of Plane's raw asset object,
+        // where name and type hide under `attributes` and size is a float.
+        let raw = json!({
+            "id": "a1", "size": 32.0, "is_uploaded": true, "created_at": "2026-01-01",
+            "attributes": {"name": "plan.pdf", "type": "application/pdf", "size": 32},
+        });
+        let listed = attachment_flat(&raw, json!(url));
+
+        assert_eq!(attached, listed, "the two commands must not drift apart");
+        let keys: Vec<&String> = listed.as_object().unwrap().keys().collect();
+        assert_eq!(keys, ["asset_url", "id", "name", "size", "type"]);
+        // Bytes are an integer on both sides, never CE's float.
+        assert!(listed["size"].is_u64(), "{listed}");
+        assert_eq!(listed["size"], json!(32));
+
+        // A raw asset carrying neither `attributes` nor a usable size is a
+        // malformed row, not a panic.
+        let bare = attachment_flat(&json!({"id": "a2", "size": null}), Value::Null);
+        assert_eq!(
+            bare,
+            json!({"id": "a2", "name": "", "size": 0, "type": "", "asset_url": null})
+        );
     }
 
     #[test]

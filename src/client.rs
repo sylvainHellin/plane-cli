@@ -249,6 +249,20 @@ impl Client {
         )
     }
 
+    /// The `asset_url` of a stored attachment.
+    ///
+    /// A listed asset carries no `asset_url` of its own, while the upload
+    /// request in step one hands one back, so this rebuilds that exact path
+    /// from the ids the listing does carry. It is the asset's address, not a
+    /// download link: the endpoint authenticates by browser session and
+    /// answers 401 to a PAT.
+    pub fn asset_url(&self, project_id: &str, issue_id: &str, asset_id: &str) -> String {
+        format!(
+            "/api/assets/v2/workspaces/{}/projects/{project_id}/issues/{issue_id}/attachments/{asset_id}/",
+            self.workspace
+        )
+    }
+
     pub fn issues(&self, project_id: &str) -> Result<Vec<Value>> {
         self.get_all(
             &format!("projects/{project_id}/issues/"),

@@ -170,6 +170,17 @@ If a confirm fails, the attachment exists but stays invisible in the web UI; `pl
 The listing prints name, size, MIME type, and asset id.
 There is no download URL column: the asset endpoint answers 401 to a PAT, since it authenticates by browser session.
 
+Under `--json` both commands describe an attachment the same way, five keys and nothing else:
+
+```json
+{"id": "...", "name": "plan.pdf", "size": 32, "type": "application/pdf", "asset_url": "/api/assets/v2/workspaces/..."}
+```
+
+This is the one place where a read does not print the API body as it came back.
+CE describes a stored asset differently from the one it just accepted: `name` and `type` sit under `attributes`, `size` is a float there and an integer here, and the listing carries no `asset_url` at all.
+So `attachments` flattens to the shape `attach` already emitted, `size` is the integer byte count on both sides, and `asset_url` is rebuilt from the ids: same entity, same keys, whichever command asked.
+`is_uploaded` and the rest of the raw row stay out of it, and the unconfirmed-upload marker lives on the rendered table.
+
 ### `--from-note`
 
 Creates an issue from an Obsidian note's frontmatter:

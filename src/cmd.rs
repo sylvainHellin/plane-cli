@@ -673,13 +673,17 @@ fn attach_one(
             format!("{name} uploaded but the confirm failed, so it stays invisible on {reference}")
         })?;
 
-    Ok(json!({
-        "id": asset_id,
-        "name": name,
-        "size": size,
-        "type": mime,
-        "asset_url": requested.get("asset_url").cloned().unwrap_or(Value::Null),
-    }))
+    Ok(output::attachment_entry(
+        &asset_id,
+        &name,
+        size,
+        mime,
+        requested
+            .get("asset_url")
+            .filter(|u| !u.is_null())
+            .cloned()
+            .unwrap_or_else(|| json!(c.asset_url(project_id, issue_id, &asset_id))),
+    ))
 }
 
 fn attached_line(entry: &Value, reference: &str) -> String {
@@ -695,12 +699,25 @@ pub fn issue_attachments(reference: &str, json: bool) -> Result<()> {
     let c = Client::new()?;
     let r = IssueRef::parse(reference)?;
     let issue = c.issue_by_ref(&r)?;
-    let mut attachments = c.attachments(
-        required_field(&issue, "project", r.as_str())?,
-        required_field(&issue, "id", r.as_str())?,
-    )?;
+    let project_id = required_field(&issue, "project", r.as_str())?.to_string();
+    let issue_id = required_field(&issue, "id", r.as_str())?.to_string();
+    let mut attachments = c.attachments(&project_id, &issue_id)?;
     attachments.sort_by_key(|a| field(a, "created_at").to_string());
-    emit(&json!(attachments), json, || {
+
+    // The same flat shape `attach --json` emits, rather than Plane's raw
+    // asset objects: one entity described one way, whichever command asked.
+    // The rendered table still reads the raw objects, because `is_uploaded`
+    // is a display concern that has no place in the flat shape.
+    let flat: Vec<Value> = attachments
+        .iter()
+        .map(|a| {
+            output::attachment_flat(
+                a,
+                json!(c.asset_url(&project_id, &issue_id, field(a, "id"))),
+            )
+        })
+        .collect();
+    emit(&json!(flat), json, || {
         output::attachment_list(&attachments, r.as_str())
     });
     Ok(())
