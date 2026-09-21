@@ -16,6 +16,15 @@ The CLI encodes the quirks once, reads the token itself so it never passes throu
 cargo install --path .
 ```
 
+## Checks
+
+```
+make check
+```
+
+Formatting, lints, and tests, in that order: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`.
+Run it before every commit; `make fmt` reformats the tree when `fmt-check` complains.
+
 ## Configuration
 
 ```
