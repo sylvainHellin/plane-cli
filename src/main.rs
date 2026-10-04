@@ -161,7 +161,7 @@ enum IssueCmd {
         #[arg(long)]
         priority: Option<String>,
 
-        /// Due date, YYYY-MM-DD
+        /// Due date, YYYY-MM-DD. `--due none` clears it.
         #[arg(long)]
         due: Option<String>,
 

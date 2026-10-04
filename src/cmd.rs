@@ -258,6 +258,9 @@ pub struct CreateArgs {
 }
 
 pub fn issue_create(args: CreateArgs) -> Result<()> {
+    // Checked before any request, so a bad date costs no API call.
+    let target_date = create_date(args.due.as_deref(), "--due")?;
+
     // With --from-note the project positional is absent, so clap puts the
     // single remaining positional (the title) into `project`.
     let (title, project_arg) = match &args.from_note {
@@ -328,10 +331,7 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
             Some(p) => Some(client::normalize_priority(p)?),
             None => None,
         },
-        target_date: match &args.due {
-            Some(d) => Some(client::validate_date(d)?),
-            None => None,
-        },
+        target_date,
         label_ids: label_ids.clone(),
         assignee_ids,
     });
@@ -419,9 +419,56 @@ struct IssueFields {
     description_html: Option<String>,
     state_id: Option<String>,
     priority: Option<String>,
-    target_date: Option<String>,
+    target_date: DateWrite,
     label_ids: Option<Vec<String>>,
     assignee_ids: Option<Vec<String>>,
+}
+
+/// What a write does to a date field. A plain `Option` cannot spell the third
+/// case: an unset field is left out of a PATCH, while a cleared one is sent
+/// as an explicit `null`.
+#[derive(Debug, Default, PartialEq)]
+enum DateWrite {
+    #[default]
+    Keep,
+    Clear,
+    Set(String),
+}
+
+impl DateWrite {
+    /// Read a date flag: absent leaves the field alone, `none` (any case)
+    /// clears it, anything else must be `YYYY-MM-DD`.
+    fn parse(arg: Option<&str>) -> Result<Self> {
+        match arg {
+            None => Ok(Self::Keep),
+            Some(d) if d.trim().to_lowercase() == "none" => Ok(Self::Clear),
+            Some(d) => Ok(Self::Set(client::validate_date(d)?)),
+        }
+    }
+
+    fn insert_into(self, body: &mut Map<String, Value>, key: &str) {
+        match self {
+            Self::Keep => {}
+            Self::Clear => {
+                body.insert(key.into(), Value::Null);
+            }
+            Self::Set(d) => {
+                body.insert(key.into(), json!(d));
+            }
+        }
+    }
+}
+
+/// A date flag on `create`, where `none` has nothing to clear. Refused rather
+/// than read as "omit", since a typo for a real date would otherwise create
+/// the issue without one and say nothing.
+fn create_date(arg: Option<&str>, flag: &str) -> Result<DateWrite> {
+    match DateWrite::parse(arg)? {
+        DateWrite::Clear => bail!(
+            "`{flag} none` clears a date, and a new issue has none to clear. Omit {flag} instead."
+        ),
+        other => Ok(other),
+    }
 }
 
 /// Assemble an issue write body. Pure, and separate from the request, so the
@@ -444,9 +491,7 @@ fn write_body(f: IssueFields) -> Map<String, Value> {
     if let Some(v) = f.priority {
         body.insert("priority".into(), json!(v));
     }
-    if let Some(v) = f.target_date {
-        body.insert("target_date".into(), json!(v));
-    }
+    f.target_date.insert_into(&mut body, "target_date");
     if let Some(v) = f.label_ids {
         body.insert("labels".into(), json!(v));
     }
@@ -520,6 +565,7 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
     {
         bail!("Nothing to update. Pass at least one of --state, --priority, --due, --title, --module, --label, --assignee.");
     }
+    let target_date = DateWrite::parse(args.due.as_deref())?;
 
     let c = Client::new()?;
     let r = IssueRef::parse(&args.reference)?;
@@ -541,10 +587,7 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
             Some(p) => Some(client::normalize_priority(p)?),
             None => None,
         },
-        target_date: match &args.due {
-            Some(d) => Some(client::validate_date(d)?),
-            None => None,
-        },
+        target_date,
         label_ids: match args.labels.is_empty() {
             true => None,
             false => Some(resolve_label_ids(&c, &project_id, &args.labels)?),
@@ -841,5 +884,46 @@ mod tests {
         });
         assert_eq!(body.keys().collect::<Vec<_>>(), vec!["state"]);
         assert!(write_body(IssueFields::default()).is_empty());
+    }
+
+    #[test]
+    fn none_clears_a_date_in_any_case() {
+        for spelling in ["none", "None", "NONE", " none "] {
+            assert_eq!(DateWrite::parse(Some(spelling)).unwrap(), DateWrite::Clear);
+        }
+        assert_eq!(DateWrite::parse(None).unwrap(), DateWrite::Keep);
+        assert_eq!(
+            DateWrite::parse(Some("2026-08-15")).unwrap(),
+            DateWrite::Set("2026-08-15".into())
+        );
+        assert!(DateWrite::parse(Some("nope")).is_err());
+    }
+
+    #[test]
+    fn a_cleared_date_is_written_as_json_null() {
+        // Plane clears a date only on an explicit `null`: an omitted key
+        // leaves it alone, and the string "none" is not a date.
+        let body = write_body(IssueFields {
+            target_date: DateWrite::Clear,
+            ..IssueFields::default()
+        });
+        assert_eq!(body.get("target_date"), Some(&Value::Null), "{body:?}");
+
+        let body = write_body(IssueFields {
+            target_date: DateWrite::Set("2026-08-15".into()),
+            ..IssueFields::default()
+        });
+        assert_eq!(body["target_date"], json!("2026-08-15"));
+    }
+
+    #[test]
+    fn create_refuses_none_for_a_date() {
+        let err = create_date(Some("None"), "--due").unwrap_err().to_string();
+        assert!(err.contains("Omit --due"), "{err}");
+        assert_eq!(create_date(None, "--due").unwrap(), DateWrite::Keep);
+        assert_eq!(
+            create_date(Some("2026-08-15"), "--due").unwrap(),
+            DateWrite::Set("2026-08-15".into())
+        );
     }
 }
