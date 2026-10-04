@@ -97,9 +97,9 @@ Other credential spellings (`token`, `pat`, `secret`, ...) are not keys, and the
 ```
 plane issue get RES-12
 plane issue list RES [--state todo] [--module "Paper 2 Drawings"] [--label deep]
-plane issue create RES "title" [--module M] [--state S] [--priority P] [--due YYYY-MM-DD] [--label L ...] [--assignee P ...] [--desc-md -]
+plane issue create RES "title" [--module M] [--state S] [--priority P] [--start YYYY-MM-DD] [--due YYYY-MM-DD] [--label L ...] [--assignee P ...] [--desc-md -]
 plane issue create --from-note <note.md> "title" [...]
-plane issue update RES-12 [--state|--priority|--due|--title|--module|--label|--assignee]
+plane issue update RES-12 [--state|--priority|--start|--due|--title|--module|--label|--assignee]
 plane issue comment RES-12 "text"
 plane issue attach RES-12 <file> [<file> ...]
 plane issue attachments RES-12
@@ -120,6 +120,20 @@ There is no `close` subcommand: it would be pure shorthand for that one flag, an
 
 State, module, label, and priority names are matched case- and separator-insensitively, so `--state done`, `--state "in progress"`, and `--state in-progress` all land.
 A name that matches nothing is an error listing the real options, never a filter that quietly returns zero rows.
+
+### Dates
+
+`--start` and `--due` take `YYYY-MM-DD` on `create` and `update`, and write `start_date` and `target_date`.
+
+```
+plane issue update RES-12 --start 2026-08-01 --due 2026-08-15
+plane issue update RES-12 --due none             # clear the due date
+```
+
+On `update`, `none` (any case) clears the date: the PATCH carries an explicit `null`, which is what CE needs to drop a stored date.
+On `create` there is nothing to clear, so `none` is an error rather than a silently omitted date.
+When one call sets both, a start after the due date is refused before anything is sent; the dates already stored on the issue are not checked.
+Issue reads show a `start:` line above `due:`.
 
 ### Labels
 
