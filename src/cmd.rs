@@ -250,6 +250,7 @@ pub struct CreateArgs {
     pub module: Option<String>,
     pub state: Option<String>,
     pub priority: Option<String>,
+    pub start: Option<String>,
     pub due: Option<String>,
     pub desc_md: Option<String>,
     pub labels: Vec<String>,
@@ -259,7 +260,9 @@ pub struct CreateArgs {
 
 pub fn issue_create(args: CreateArgs) -> Result<()> {
     // Checked before any request, so a bad date costs no API call.
+    let start_date = create_date(args.start.as_deref(), "--start")?;
     let target_date = create_date(args.due.as_deref(), "--due")?;
+    check_date_order(&start_date, &target_date)?;
 
     // With --from-note the project positional is absent, so clap puts the
     // single remaining positional (the title) into `project`.
@@ -331,6 +334,7 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
             Some(p) => Some(client::normalize_priority(p)?),
             None => None,
         },
+        start_date,
         target_date,
         label_ids: label_ids.clone(),
         assignee_ids,
@@ -419,6 +423,7 @@ struct IssueFields {
     description_html: Option<String>,
     state_id: Option<String>,
     priority: Option<String>,
+    start_date: DateWrite,
     target_date: DateWrite,
     label_ids: Option<Vec<String>>,
     assignee_ids: Option<Vec<String>>,
@@ -471,6 +476,18 @@ fn create_date(arg: Option<&str>, flag: &str) -> Result<DateWrite> {
     }
 }
 
+/// Refuse a start date after the due date when one call sets both. Only the
+/// dates in hand are compared: checking against the stored ones would cost a
+/// read. `YYYY-MM-DD` sorts as a string, so no date parsing is needed.
+fn check_date_order(start: &DateWrite, due: &DateWrite) -> Result<()> {
+    if let (DateWrite::Set(s), DateWrite::Set(d)) = (start, due) {
+        if s > d {
+            bail!("--start {s} is after --due {d}. A start date cannot come after the due date.");
+        }
+    }
+    Ok(())
+}
+
 /// Assemble an issue write body. Pure, and separate from the request, so the
 /// field *names* are pinned by a test rather than by a live call.
 ///
@@ -491,6 +508,7 @@ fn write_body(f: IssueFields) -> Map<String, Value> {
     if let Some(v) = f.priority {
         body.insert("priority".into(), json!(v));
     }
+    f.start_date.insert_into(&mut body, "start_date");
     f.target_date.insert_into(&mut body, "target_date");
     if let Some(v) = f.label_ids {
         body.insert("labels".into(), json!(v));
@@ -546,6 +564,7 @@ pub struct UpdateArgs {
     pub reference: String,
     pub state: Option<String>,
     pub priority: Option<String>,
+    pub start: Option<String>,
     pub due: Option<String>,
     pub title: Option<String>,
     pub module: Option<String>,
@@ -554,18 +573,27 @@ pub struct UpdateArgs {
     pub json: bool,
 }
 
-pub fn issue_update(args: UpdateArgs) -> Result<()> {
+/// Refuse an update that names no field, before any request is made.
+fn check_something_to_update(args: &UpdateArgs) -> Result<()> {
     if args.state.is_none()
         && args.priority.is_none()
+        && args.start.is_none()
         && args.due.is_none()
         && args.title.is_none()
         && args.module.is_none()
         && args.labels.is_empty()
         && args.assignees.is_empty()
     {
-        bail!("Nothing to update. Pass at least one of --state, --priority, --due, --title, --module, --label, --assignee.");
+        bail!("Nothing to update. Pass at least one of --state, --priority, --start, --due, --title, --module, --label, --assignee.");
     }
+    Ok(())
+}
+
+pub fn issue_update(args: UpdateArgs) -> Result<()> {
+    check_something_to_update(&args)?;
+    let start_date = DateWrite::parse(args.start.as_deref())?;
     let target_date = DateWrite::parse(args.due.as_deref())?;
+    check_date_order(&start_date, &target_date)?;
 
     let c = Client::new()?;
     let r = IssueRef::parse(&args.reference)?;
@@ -587,6 +615,7 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
             Some(p) => Some(client::normalize_priority(p)?),
             None => None,
         },
+        start_date,
         target_date,
         label_ids: match args.labels.is_empty() {
             true => None,
@@ -904,16 +933,69 @@ mod tests {
         // Plane clears a date only on an explicit `null`: an omitted key
         // leaves it alone, and the string "none" is not a date.
         let body = write_body(IssueFields {
+            start_date: DateWrite::Clear,
             target_date: DateWrite::Clear,
             ..IssueFields::default()
         });
+        assert_eq!(body.get("start_date"), Some(&Value::Null), "{body:?}");
         assert_eq!(body.get("target_date"), Some(&Value::Null), "{body:?}");
+        assert_eq!(body.len(), 2, "{body:?}");
 
         let body = write_body(IssueFields {
+            start_date: DateWrite::Set("2026-08-01".into()),
             target_date: DateWrite::Set("2026-08-15".into()),
             ..IssueFields::default()
         });
+        assert_eq!(body["start_date"], json!("2026-08-01"));
         assert_eq!(body["target_date"], json!("2026-08-15"));
+    }
+
+    #[test]
+    fn a_start_after_the_due_date_is_refused() {
+        let set = |d: &str| DateWrite::Set(d.into());
+        let err = check_date_order(&set("2026-08-20"), &set("2026-08-15"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("--start 2026-08-20 is after --due 2026-08-15"),
+            "{err}"
+        );
+        // Same day, the right order, or only one side in hand: all fine.
+        assert!(check_date_order(&set("2026-08-15"), &set("2026-08-15")).is_ok());
+        assert!(check_date_order(&set("2026-08-01"), &set("2026-08-15")).is_ok());
+        assert!(check_date_order(&set("2026-08-20"), &DateWrite::Keep).is_ok());
+        assert!(check_date_order(&set("2026-08-20"), &DateWrite::Clear).is_ok());
+    }
+
+    fn update_args() -> UpdateArgs {
+        UpdateArgs {
+            reference: "RES-1".into(),
+            state: None,
+            priority: None,
+            start: None,
+            due: None,
+            title: None,
+            module: None,
+            labels: Vec::new(),
+            assignees: Vec::new(),
+            json: false,
+        }
+    }
+
+    #[test]
+    fn an_update_with_no_field_names_every_flag_including_start() {
+        let err = check_something_to_update(&update_args())
+            .unwrap_err()
+            .to_string();
+        assert!(err.starts_with("Nothing to update."), "{err}");
+        assert!(err.contains("--start"), "{err}");
+        assert!(err.contains("--due"), "{err}");
+        // `--start` alone is a field to update.
+        let args = UpdateArgs {
+            start: Some("none".into()),
+            ..update_args()
+        };
+        assert!(check_something_to_update(&args).is_ok());
     }
 
     #[test]
@@ -925,5 +1007,9 @@ mod tests {
             create_date(Some("2026-08-15"), "--due").unwrap(),
             DateWrite::Set("2026-08-15".into())
         );
+        let err = create_date(Some("NONE"), "--start")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("Omit --start"), "{err}");
     }
 }

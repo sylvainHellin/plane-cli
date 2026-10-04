@@ -26,6 +26,9 @@ struct Cli {
     json: bool,
 }
 
+// Built once per run from argv, so the size of the `Issue` variant costs
+// nothing, and boxing it would cost every match on it a deref.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 enum Commands {
     /// Read and write issues
@@ -130,6 +133,10 @@ enum IssueCmd {
         #[arg(long)]
         priority: Option<String>,
 
+        /// Start date, YYYY-MM-DD
+        #[arg(long)]
+        start: Option<String>,
+
         /// Due date, YYYY-MM-DD
         #[arg(long)]
         due: Option<String>,
@@ -160,6 +167,10 @@ enum IssueCmd {
         /// urgent, high, medium, low, none
         #[arg(long)]
         priority: Option<String>,
+
+        /// Start date, YYYY-MM-DD. `--start none` clears it.
+        #[arg(long)]
+        start: Option<String>,
 
         /// Due date, YYYY-MM-DD. `--due none` clears it.
         #[arg(long)]
@@ -270,6 +281,7 @@ fn main() {
                 module,
                 state,
                 priority,
+                start,
                 due,
                 desc_md,
                 labels,
@@ -281,6 +293,7 @@ fn main() {
                 module,
                 state,
                 priority,
+                start,
                 due,
                 desc_md,
                 labels,
@@ -291,6 +304,7 @@ fn main() {
                 reference,
                 state,
                 priority,
+                start,
                 due,
                 title,
                 module,
@@ -300,6 +314,7 @@ fn main() {
                 reference,
                 state,
                 priority,
+                start,
                 due,
                 title,
                 module,
@@ -437,6 +452,34 @@ mod tests {
         match cli.command {
             Commands::Issue(IssueCmd::Create { assignees, .. }) => {
                 assert_eq!(assignees, vec!["Robin".to_string()]);
+            }
+            _ => panic!("wrong command"),
+        }
+    }
+
+    #[test]
+    fn start_is_accepted_on_create_and_update() {
+        let cli = Cli::try_parse_from([
+            "plane",
+            "issue",
+            "create",
+            "RES",
+            "T",
+            "--start",
+            "2026-08-01",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Issue(IssueCmd::Create { start, .. }) => {
+                assert_eq!(start.as_deref(), Some("2026-08-01"));
+            }
+            _ => panic!("wrong command"),
+        }
+        let cli =
+            Cli::try_parse_from(["plane", "issue", "update", "RES-1", "--start", "none"]).unwrap();
+        match cli.command {
+            Commands::Issue(IssueCmd::Update { start, .. }) => {
+                assert_eq!(start.as_deref(), Some("none"));
             }
             _ => panic!("wrong command"),
         }
