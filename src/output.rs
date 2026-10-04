@@ -154,6 +154,10 @@ pub fn issue_detail(issue: &Value, reference: &str, workspace: &str) -> String {
     out.push_str(&format!("  state:    {}\n", dash(state_name(issue))));
     out.push_str(&format!("  priority: {}\n", dash(field(issue, "priority"))));
     out.push_str(&format!(
+        "  start:    {}\n",
+        dash(field(issue, "start_date"))
+    ));
+    out.push_str(&format!(
         "  due:      {}\n",
         dash(field(issue, "target_date"))
     ));
@@ -490,9 +494,23 @@ mod tests {
             json!({"name": "T", "sequence_id": 1, "priority": null, "state": {"name": "Todo"}});
         let out = issue_detail(&issue, "RES-1", "acme");
         assert!(out.contains("priority: -"));
+        assert!(out.contains("start:    -"));
         assert!(out.contains("due:      -"));
         assert!(out.contains("labels:   -"));
         assert!(out.contains("assigned: -"));
+    }
+
+    #[test]
+    fn the_start_date_sits_just_above_the_due_date() {
+        let issue = json!({
+            "name": "T", "sequence_id": 1, "state": {"name": "Todo"},
+            "start_date": "2026-08-01", "target_date": "2026-08-15"
+        });
+        let out = issue_detail(&issue, "RES-1", "acme");
+        assert!(
+            out.contains("  start:    2026-08-01\n  due:      2026-08-15\n"),
+            "{out}"
+        );
     }
 
     #[test]
