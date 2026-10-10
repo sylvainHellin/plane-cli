@@ -28,6 +28,15 @@ const PAGE_SIZE: u32 = 100;
 /// misbehaving rather than that the list is long.
 const MAX_PAGES: usize = 500;
 
+/// What an issue read expands in place. The rendered and `--raw` views keep
+/// the expansions they always had, so `--raw` prints the body it always
+/// printed; the compact `--json` view also expands `parent`, which turns the
+/// parent's UUID into its `sequence_id` (and a null parent into `{}`), and
+/// `assignees`, so it can name both without a call per row.
+pub const EXPAND_ISSUE: &str = "state,labels,assignees";
+pub const EXPAND_LIST: &str = "state,labels";
+pub const EXPAND_COMPACT: &str = "state,labels,assignees,parent";
+
 /// Valid `priority` values on an issue.
 pub const PRIORITIES: [&str; 5] = ["urgent", "high", "medium", "low", "none"];
 
@@ -199,11 +208,13 @@ impl Client {
 
     /// Resolve `RES-12` in one call, with state and labels expanded in place.
     pub fn issue_by_ref(&self, r: &IssueRef) -> Result<Value> {
-        self.get(
-            &format!("issues/{}/", r.as_str()),
-            &[("expand", "state,labels,assignees")],
-        )
-        .with_context(|| format!("Could not resolve issue {}", r.as_str()))
+        self.issue_by_ref_expanding(r, EXPAND_ISSUE)
+    }
+
+    /// [`Self::issue_by_ref`] with a chosen expansion, for the compact view.
+    pub fn issue_by_ref_expanding(&self, r: &IssueRef, expand: &str) -> Result<Value> {
+        self.get(&format!("issues/{}/", r.as_str()), &[("expand", expand)])
+            .with_context(|| format!("Could not resolve issue {}", r.as_str()))
     }
 
     pub fn projects(&self) -> Result<Vec<Value>> {
@@ -263,20 +274,39 @@ impl Client {
         )
     }
 
-    pub fn issues(&self, project_id: &str) -> Result<Vec<Value>> {
+    pub fn issues(&self, project_id: &str, expand: &str) -> Result<Vec<Value>> {
         self.get_all(
             &format!("projects/{project_id}/issues/"),
-            &[("expand", "state,labels")],
+            &[("expand", expand)],
         )
     }
 
     /// Issues of a module. CE returns the issue objects themselves here, so
     /// there is nothing to unwrap.
-    pub fn module_issues(&self, project_id: &str, module_id: &str) -> Result<Vec<Value>> {
+    pub fn module_issues(
+        &self,
+        project_id: &str,
+        module_id: &str,
+        expand: &str,
+    ) -> Result<Vec<Value>> {
         self.get_all(
             &format!("projects/{project_id}/modules/{module_id}/module-issues/"),
-            &[("expand", "state,labels")],
+            &[("expand", expand)],
         )
+    }
+
+    /// The issue UUIDs of a module, and nothing else: `fields=id` trims each
+    /// row to its id, so naming the modules of every issue costs one small
+    /// call per module rather than a full issue body per row.
+    pub fn module_issue_ids(&self, project_id: &str, module_id: &str) -> Result<Vec<String>> {
+        Ok(self
+            .get_all(
+                &format!("projects/{project_id}/modules/{module_id}/module-issues/"),
+                &[("fields", "id")],
+            )?
+            .iter()
+            .filter_map(|i| i.get("id").and_then(Value::as_str).map(String::from))
+            .collect())
     }
 
     // ---- writes ----
@@ -727,6 +757,11 @@ impl IssueRef {
     pub fn as_str(&self) -> &str {
         &self.text
     }
+
+    /// The project identifier part, `RES` for `RES-12`.
+    pub fn identifier(&self) -> &str {
+        self.text.rsplit_once('-').map_or("", |(i, _)| i)
+    }
 }
 
 #[cfg(test)]
@@ -737,6 +772,12 @@ mod tests {
     fn issue_ref_uppercases_the_identifier() {
         assert_eq!(IssueRef::parse("res-12").unwrap().as_str(), "RES-12");
         assert_eq!(IssueRef::parse(" RES-12 ").unwrap().as_str(), "RES-12");
+    }
+
+    #[test]
+    fn issue_ref_names_its_project_identifier() {
+        assert_eq!(IssueRef::parse("res-12").unwrap().identifier(), "RES");
+        assert_eq!(IssueRef::parse("TEACH2-3").unwrap().identifier(), "TEACH2");
     }
 
     #[test]

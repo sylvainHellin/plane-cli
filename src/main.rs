@@ -21,9 +21,15 @@ struct Cli {
     #[command(subcommand)]
     command: Commands,
 
-    /// Print the raw API response instead of rendered lines
+    /// Print compact JSON instead of rendered lines: names resolved, no
+    /// audit fields, descriptions as plain text and left out of lists, one array
+    /// element per line
     #[arg(long, global = true)]
     json: bool,
+
+    /// Print the raw Plane API response as pretty JSON (implies --json)
+    #[arg(long, global = true)]
+    raw: bool,
 }
 
 // Built once per run from argv, so the size of the `Issue` variant costs
@@ -257,11 +263,11 @@ enum LabelCmd {
 
 fn main() {
     let cli = Cli::parse();
-    let json = cli.json;
+    let format = output::Format::from_flags(cli.json, cli.raw);
 
     let result = match cli.command {
         Commands::Issue(issue) => match issue {
-            IssueCmd::Get { reference } => cmd::issue_get(&reference, json),
+            IssueCmd::Get { reference } => cmd::issue_get(&reference, format),
             IssueCmd::List {
                 project,
                 state,
@@ -272,7 +278,7 @@ fn main() {
                 state.as_deref(),
                 module.as_deref(),
                 label.as_deref(),
-                json,
+                format,
             ),
             IssueCmd::Create {
                 project,
@@ -298,7 +304,7 @@ fn main() {
                 desc_md,
                 labels,
                 assignees,
-                json,
+                format,
             }),
             IssueCmd::Update {
                 reference,
@@ -320,21 +326,21 @@ fn main() {
                 module,
                 labels,
                 assignees,
-                json,
+                format,
             }),
-            IssueCmd::Comment { reference, text } => cmd::issue_comment(&reference, &text, json),
-            IssueCmd::Attach { reference, files } => cmd::issue_attach(&reference, &files, json),
-            IssueCmd::Attachments { reference } => cmd::issue_attachments(&reference, json),
+            IssueCmd::Comment { reference, text } => cmd::issue_comment(&reference, &text, format),
+            IssueCmd::Attach { reference, files } => cmd::issue_attach(&reference, &files, format),
+            IssueCmd::Attachments { reference } => cmd::issue_attachments(&reference, format),
         },
-        Commands::Project(ProjectCmd::List) => cmd::project_list(json),
-        Commands::Module(ModuleCmd::List { project }) => cmd::module_list(&project, json),
-        Commands::State(StateCmd::List { project }) => cmd::state_list(&project, json),
-        Commands::Label(LabelCmd::List { project }) => cmd::label_list(&project, json),
+        Commands::Project(ProjectCmd::List) => cmd::project_list(format),
+        Commands::Module(ModuleCmd::List { project }) => cmd::module_list(&project, format),
+        Commands::State(StateCmd::List { project }) => cmd::state_list(&project, format),
+        Commands::Label(LabelCmd::List { project }) => cmd::label_list(&project, format),
         Commands::Config(config) => match config {
-            ConfigCmd::Set { key, value } => cmd::config_set(&key, &value, json),
-            ConfigCmd::Unset { key } => cmd::config_unset(&key, json),
-            ConfigCmd::Show => cmd::config_show(json),
-            ConfigCmd::Path => cmd::config_path(json),
+            ConfigCmd::Set { key, value } => cmd::config_set(&key, &value, format),
+            ConfigCmd::Unset { key } => cmd::config_unset(&key, format),
+            ConfigCmd::Show => cmd::config_show(format),
+            ConfigCmd::Path => cmd::config_path(format),
         },
     };
 
@@ -391,6 +397,21 @@ mod tests {
     fn json_is_global_and_works_after_the_subcommand() {
         let cli = Cli::try_parse_from(["plane", "issue", "get", "RES-12", "--json"]).unwrap();
         assert!(cli.json);
+    }
+
+    #[test]
+    fn raw_is_global_and_stands_alone_or_beside_json() {
+        let cli = Cli::try_parse_from(["plane", "--raw", "issue", "list", "RES"]).unwrap();
+        assert_eq!(
+            output::Format::from_flags(cli.json, cli.raw),
+            output::Format::Raw
+        );
+        let cli =
+            Cli::try_parse_from(["plane", "issue", "get", "RES-1", "--json", "--raw"]).unwrap();
+        assert_eq!(
+            output::Format::from_flags(cli.json, cli.raw),
+            output::Format::Raw
+        );
     }
 
     #[test]

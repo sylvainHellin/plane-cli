@@ -1,29 +1,214 @@
-//! Rendering. Compact aligned lines by default, raw API body under `--json`.
+//! Rendering. Aligned lines by default, compact JSON under `--json`, the raw
+//! API body under `--raw`.
 //!
-//! `--json` prints the API body as it came back, so anything this module
-//! chooses not to show is still one flag away. A list prints as a bare array
-//! of those bodies, every page already merged, so `jq '.[]'` walks it the
-//! same way it walks a single object fetched with `get`.
+//! `--json` is the view a script reads: names resolved, no UUIDs a command
+//! does not take back, no editor markup, one array element per line. `--raw`
+//! prints the API body as it came back, so anything the compact view leaves
+//! out is still one flag away. Either way a list prints as a bare array,
+//! every page already merged, so `jq '.[]'` walks it the same way it walks a
+//! single object fetched with `get`.
 
 use anyhow::{anyhow, Result};
-use serde_json::Value;
+use serde_json::{json, Value};
+use std::collections::HashMap;
 
 use crate::config::{self, Resolved};
 use crate::markdown;
 
-/// Print either the raw API value or a rendered view.
-pub fn emit(raw: &Value, json: bool, rendered: impl FnOnce() -> String) {
-    if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(raw).unwrap_or_else(|e| format!("JSON error: {e}"))
-        );
-    } else {
-        let text = rendered();
-        if !text.is_empty() {
-            println!("{text}");
+/// How a command prints its result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Format {
+    /// Aligned lines for a person.
+    Text,
+    /// Compact, resolved JSON for a script.
+    Json,
+    /// The API body as it came back, pretty-printed.
+    Raw,
+}
+
+impl Format {
+    /// `--raw` wins over `--json`, so `--json --raw` and `--raw` mean the same.
+    pub fn from_flags(json: bool, raw: bool) -> Self {
+        match (json, raw) {
+            (_, true) => Format::Raw,
+            (true, false) => Format::Json,
+            (false, false) => Format::Text,
         }
     }
+}
+
+/// Print the view `format` asks for. `compact` is only built under `--json`,
+/// so the rendered and raw paths never pay for it.
+pub fn emit(
+    format: Format,
+    raw: &Value,
+    compact: impl FnOnce() -> Value,
+    rendered: impl FnOnce() -> String,
+) {
+    match format {
+        Format::Raw => println!(
+            "{}",
+            serde_json::to_string_pretty(raw).unwrap_or_else(|e| format!("JSON error: {e}"))
+        ),
+        Format::Json => println!("{}", compact_json(&compact())),
+        Format::Text => {
+            let text = rendered();
+            if !text.is_empty() {
+                println!("{text}");
+            }
+        }
+    }
+}
+
+/// [`emit`] for a value the CLI built itself, where raw and compact are one
+/// and the same: the config commands, and the flat attachment entries.
+pub fn emit_own(format: Format, value: &Value, rendered: impl FnOnce() -> String) {
+    emit(format, value, || value.clone(), rendered);
+}
+
+/// Serialise without indentation, but one array element per line: a list of a
+/// hundred issues stays a hundred readable lines rather than one 40 KB line or
+/// three thousand indented ones, and it is still a single JSON document.
+pub fn compact_json(v: &Value) -> String {
+    match v.as_array() {
+        Some(items) if !items.is_empty() => {
+            let lines: Vec<String> = items.iter().map(Value::to_string).collect();
+            format!("[\n{}\n]", lines.join(",\n"))
+        }
+        _ => v.to_string(),
+    }
+}
+
+/// A string field as JSON: the string, or `null` when absent, null, or empty,
+/// so a script tests one thing for "not set".
+fn opt_str(v: &Value, key: &str) -> Value {
+    match field(v, key) {
+        "" => Value::Null,
+        s => json!(s),
+    }
+}
+
+/// What the compact view of an issue needs beyond the issue itself.
+pub struct IssueContext<'a> {
+    /// The project identifier, e.g. `RES`, which every reference is built on.
+    pub identifier: &'a str,
+    pub workspace: &'a str,
+    /// Module names by issue UUID. The relation lives in a join table, so the
+    /// issue record cannot say which modules hold it.
+    pub modules: &'a HashMap<String, Vec<String>>,
+}
+
+/// The compact `--json` view of one issue: names instead of UUIDs, a
+/// reference instead of a sequence number, and no audit or editor fields.
+///
+/// `description` is plain text and only present when asked for: `issue get`
+/// and the single-issue writes carry it, `issue list` does not, because a list
+/// of bodies is what made the raw list forty times its rendered size.
+pub fn issue_compact(issue: &Value, ctx: &IssueContext, with_description: bool) -> Value {
+    let reference = issue
+        .get("sequence_id")
+        .and_then(Value::as_i64)
+        .map(|n| format!("{}-{n}", ctx.identifier))
+        .unwrap_or_default();
+    let state = issue.get("state");
+    let modules = ctx
+        .modules
+        .get(field(issue, "id"))
+        .cloned()
+        .unwrap_or_default();
+    let mut out = json!({
+        "identifier": reference,
+        "name": field(issue, "name"),
+        "state": state.map(|s| opt_str(s, "name")).unwrap_or(Value::Null),
+        "state_group": state.map(|s| opt_str(s, "group")).unwrap_or(Value::Null),
+        "priority": opt_str(issue, "priority"),
+        "labels": label_names(issue),
+        "modules": modules,
+        "assignees": assignee_display_names(issue),
+        "start": opt_str(issue, "start_date"),
+        "due": opt_str(issue, "target_date"),
+        "created_at": opt_str(issue, "created_at"),
+        "updated_at": opt_str(issue, "updated_at"),
+        "completed_at": opt_str(issue, "completed_at"),
+        "parent": parent_ref(issue, ctx.identifier),
+        "url": issue_url(ctx.workspace, &reference),
+    });
+    if with_description {
+        out["description"] = json!(markdown::to_text(field(issue, "description_html")));
+    }
+    out
+}
+
+/// The parent of an issue fetched with `?expand=parent`, as a reference.
+///
+/// The expansion carries the parent's `sequence_id` and turns a null parent
+/// into `{}`, so an object without a number is "no parent". CE keeps a
+/// parent in its child's project, so the child's identifier is the parent's.
+fn parent_ref(issue: &Value, identifier: &str) -> Value {
+    match issue.get("parent") {
+        Some(Value::Object(p)) => p
+            .get("sequence_id")
+            .and_then(Value::as_i64)
+            .map(|n| json!(format!("{identifier}-{n}")))
+            .unwrap_or(Value::Null),
+        // Unexpanded: a UUID is still better than claiming there is no parent.
+        Some(Value::String(s)) if !s.is_empty() => json!(s),
+        _ => Value::Null,
+    }
+}
+
+/// Assignees by display name, the unique handle `--assignee` also accepts;
+/// first name only where a member has no display name.
+fn assignee_display_names(issue: &Value) -> Vec<&str> {
+    issue
+        .get("assignees")
+        .and_then(Value::as_array)
+        .map(|xs| {
+            xs.iter()
+                .filter_map(|a| {
+                    [field(a, "display_name"), field(a, "first_name")]
+                        .into_iter()
+                        .find(|s| !s.is_empty())
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A project as `--json` lists it. The UUID stays: a bridged note's
+/// `plane_project_id` is the one place a command takes it back.
+pub fn project_compact(p: &Value) -> Value {
+    json!({"identifier": field(p, "identifier"), "name": field(p, "name"), "id": field(p, "id")})
+}
+
+/// A module as `--json` lists it, UUID kept for `plane_module_id`.
+pub fn module_compact(m: &Value) -> Value {
+    json!({
+        "name": field(m, "name"),
+        "status": opt_str(m, "status"),
+        "start": opt_str(m, "start_date"),
+        "due": opt_str(m, "target_date"),
+        "id": field(m, "id"),
+    })
+}
+
+/// A state as `--json` lists it. Every write takes the name.
+pub fn state_compact(s: &Value) -> Value {
+    json!({"name": field(s, "name"), "group": opt_str(s, "group")})
+}
+
+/// A label as `--json` lists it. Every write takes the name.
+pub fn label_compact(l: &Value) -> Value {
+    json!({"name": field(l, "name"), "color": opt_str(l, "color")})
+}
+
+/// A comment as `--json` reports it: which issue, the text, and when.
+pub fn comment_compact(comment: &Value, reference: &str) -> Value {
+    json!({
+        "issue": reference,
+        "text": markdown::to_text(field(comment, "comment_html")),
+        "created_at": opt_str(comment, "created_at"),
+    })
 }
 
 /// A string field, or `""` when absent or null.
@@ -634,6 +819,151 @@ mod tests {
         assert_eq!(
             out.lines().next().unwrap(),
             "/tmp/plane/config.toml  (not written yet)"
+        );
+    }
+
+    /// An issue as CE returns it under `EXPAND_COMPACT`, audit fields and all.
+    fn expanded_issue() -> Value {
+        json!({
+            "id": "i-uuid", "sequence_id": 12, "name": "Write the paper",
+            "project": "p-uuid", "workspace": "w-uuid", "created_by": "u-uuid",
+            "priority": "high", "start_date": "2026-08-01", "target_date": null,
+            "created_at": "2026-07-30T10:50:15Z", "updated_at": "2026-09-11T15:17:22Z",
+            "completed_at": null, "sort_order": 65535.0,
+            "state": {"id": "s-uuid", "name": "In Progress", "group": "started", "color": "#f00"},
+            "labels": [{"id": "l-uuid", "name": "deep"}],
+            "assignees": [
+                {"id": "a-uuid", "first_name": "Robin", "display_name": "robin.assistant"},
+                {"id": "b-uuid", "first_name": "Sam", "display_name": ""},
+            ],
+            "parent": {"id": "x-uuid", "sequence_id": 4, "project_id": "p-uuid"},
+            "description_html": "<p>First &amp; <strong>second</strong></p><p>Third</p>",
+        })
+    }
+
+    #[test]
+    fn the_compact_issue_names_everything_and_carries_no_uuid() {
+        let modules = HashMap::from([("i-uuid".to_string(), vec!["Paper 2".to_string()])]);
+        let ctx = IssueContext {
+            identifier: "RES",
+            workspace: "acme",
+            modules: &modules,
+        };
+        let out = issue_compact(&expanded_issue(), &ctx, true);
+        assert_eq!(out["identifier"], json!("RES-12"));
+        assert_eq!(out["name"], json!("Write the paper"));
+        assert_eq!(out["state"], json!("In Progress"));
+        assert_eq!(out["state_group"], json!("started"));
+        assert_eq!(out["priority"], json!("high"));
+        assert_eq!(out["labels"], json!(["deep"]));
+        assert_eq!(out["modules"], json!(["Paper 2"]));
+        // Display name is the unique handle; first name only fills a gap.
+        assert_eq!(out["assignees"], json!(["robin.assistant", "Sam"]));
+        assert_eq!(out["start"], json!("2026-08-01"));
+        assert_eq!(out["due"], Value::Null);
+        assert_eq!(out["completed_at"], Value::Null);
+        assert_eq!(out["parent"], json!("RES-4"));
+        assert_eq!(out["description"], json!("First & second\nThird"));
+        assert!(
+            !out.to_string().contains("uuid"),
+            "no UUID may leak into the compact view: {out}"
+        );
+    }
+
+    #[test]
+    fn the_list_view_leaves_the_description_out() {
+        let ctx = IssueContext {
+            identifier: "RES",
+            workspace: "acme",
+            modules: &HashMap::new(),
+        };
+        let out = issue_compact(&expanded_issue(), &ctx, false);
+        assert!(out.get("description").is_none(), "{out}");
+        // An issue in no module still has the key, as an empty list.
+        assert_eq!(out["modules"], json!([]));
+        let keys: Vec<&String> = out.as_object().unwrap().keys().collect();
+        assert_eq!(
+            keys,
+            [
+                "assignees",
+                "completed_at",
+                "created_at",
+                "due",
+                "identifier",
+                "labels",
+                "modules",
+                "name",
+                "parent",
+                "priority",
+                "start",
+                "state",
+                "state_group",
+                "updated_at",
+                "url"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_expanded_null_parent_reads_as_no_parent() {
+        // `?expand=parent` turns a null parent into `{}`.
+        assert_eq!(parent_ref(&json!({"parent": {}}), "RES"), Value::Null);
+        assert_eq!(parent_ref(&json!({"parent": null}), "RES"), Value::Null);
+        assert_eq!(parent_ref(&json!({}), "RES"), Value::Null);
+        assert_eq!(
+            parent_ref(&json!({"parent": {"sequence_id": 68}}), "RES"),
+            json!("RES-68")
+        );
+    }
+
+    #[test]
+    fn compact_json_puts_one_array_element_per_line() {
+        let v = json!([{"a": 1}, {"a": 2}]);
+        let out = compact_json(&v);
+        assert_eq!(out, "[\n{\"a\":1},\n{\"a\":2}\n]");
+        // Still one JSON document, and the same one.
+        assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), v);
+        assert_eq!(compact_json(&json!([])), "[]");
+        assert_eq!(compact_json(&json!({"a": [1, 2]})), "{\"a\":[1,2]}");
+    }
+
+    #[test]
+    fn raw_wins_over_json_and_neither_is_text() {
+        assert_eq!(Format::from_flags(false, false), Format::Text);
+        assert_eq!(Format::from_flags(true, false), Format::Json);
+        assert_eq!(Format::from_flags(false, true), Format::Raw);
+        assert_eq!(Format::from_flags(true, true), Format::Raw);
+    }
+
+    #[test]
+    fn list_entities_keep_a_uuid_only_where_a_note_takes_it_back() {
+        let p = json!({"id": "p1", "identifier": "RES", "name": "Research", "network": 2});
+        assert_eq!(
+            project_compact(&p),
+            json!({"identifier": "RES", "name": "Research", "id": "p1"})
+        );
+        let m = json!({"id": "m1", "name": "Paper", "status": "in-progress",
+                       "start_date": "2026-10-09", "target_date": null, "project": "p1"});
+        assert_eq!(
+            module_compact(&m),
+            json!({"name": "Paper", "status": "in-progress", "start": "2026-10-09", "due": null, "id": "m1"})
+        );
+        let s = json!({"id": "s1", "name": "Done", "group": "completed", "project": "p1"});
+        assert_eq!(
+            state_compact(&s),
+            json!({"name": "Done", "group": "completed"})
+        );
+        let l = json!({"id": "l1", "name": "deep", "color": "#000", "project": "p1"});
+        assert_eq!(label_compact(&l), json!({"name": "deep", "color": "#000"}));
+    }
+
+    #[test]
+    fn a_comment_reports_its_issue_and_plain_text() {
+        let c = json!({"id": "c1", "comment_html": "<p>Done &amp; dusted</p>",
+                       "created_at": "2026-10-10T08:00:00Z", "actor": "u1"});
+        assert_eq!(
+            comment_compact(&c, "RES-12"),
+            json!({"issue": "RES-12", "text": "Done & dusted", "created_at": "2026-10-10T08:00:00Z"})
         );
     }
 

@@ -110,10 +110,31 @@ plane label list RES
 plane config set|unset|show|path
 ```
 
-`--json` is global, so `plane issue get RES-12 --json | jq -r .name` works on every command.
-Single-object commands print the API body as it came back.
+`--json` and `--raw` are global, so `plane issue get RES-12 --json | jq -r .name` works on every command.
+
+`--json` prints compact JSON for a script to read: names instead of UUIDs, no audit or editor fields, one array element per line.
+`--raw` prints the Plane API body as it came back, pretty-printed, for anything the compact view leaves out; `--json --raw` means the same.
+On `issue list RES` the raw body is about 246 KB, the compact one 41 KB, and the rendered table 7 KB.
+
+An issue under `--json` carries these keys, `null` where a value is unset:
+
+```json
+{"identifier": "RES-5", "name": "Email Prof. Kim", "state": "Todo", "state_group": "unstarted",
+ "priority": "high", "labels": ["quick"], "modules": ["Paper 2"], "assignees": ["sylvain"],
+ "start": null, "due": "2026-08-15", "created_at": "...", "updated_at": "...", "completed_at": null,
+ "parent": "RES-68", "url": "https://.../tum/browse/RES-5/", "description": "plain text"}
+```
+
+`description` is the stored HTML flattened to text, and only `issue get`, `create` and `update` carry it; `issue list` leaves it out.
+`assignees` holds display names, which `--assignee` accepts back.
+`modules` costs one extra call per module of the project, because the issue record does not say which modules hold it.
+Projects print `identifier`, `name`, `id`; modules `name`, `status`, `start`, `due`, `id`; states `name`, `group`; labels `name`, `color`.
+The project and module UUIDs stay because a bridged note's frontmatter takes them back (see `--from-note`).
+A comment prints `issue`, `text`, `created_at`.
+
 List commands print a bare JSON array with every page already merged into it, so `jq '.[]'` walks a list the same way `jq .name` reads a single object.
 There is no `{count, results}` envelope to unwrap: a list is fetched across as many pages as the cursor takes, so no single raw body exists to print anyway, and `jq 'length'` gives the count.
+Errors go to stderr with exit status 1, and stdout then stays empty.
 
 Closing a ticket is `plane issue update RES-12 --state done`.
 There is no `close` subcommand: it would be pure shorthand for that one flag, and the GUI gesture it mirrors is also just setting the status.
@@ -190,10 +211,10 @@ Under `--json` both commands describe an attachment the same way, five keys and 
 {"id": "...", "name": "plan.pdf", "size": 32, "type": "application/pdf", "asset_url": "/api/assets/v2/workspaces/..."}
 ```
 
-This is the one place where a read does not print the API body as it came back.
 CE describes a stored asset differently from the one it just accepted: `name` and `type` sit under `attributes`, `size` is a float there and an integer here, and the listing carries no `asset_url` at all.
 So `attachments` flattens to the shape `attach` already emitted, `size` is the integer byte count on both sides, and `asset_url` is rebuilt from the ids: same entity, same keys, whichever command asked.
 `is_uploaded` and the rest of the raw row stay out of it, and the unconfirmed-upload marker lives on the rendered table.
+`plane issue attachments --raw` prints the raw rows; `attach --raw` keeps the flat shape, since its raw responses carry presigned upload credentials.
 
 ### `--from-note`
 

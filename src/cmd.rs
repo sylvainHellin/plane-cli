@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -10,11 +11,11 @@ use crate::config::{self, ConfigFile, Key, Source};
 use crate::markdown;
 use crate::mime;
 use crate::note;
-use crate::output::{self, emit, field, required_field};
+use crate::output::{self, emit, emit_own, field, required_field, Format, IssueContext};
 
 // ---- configuration ----
 
-pub fn config_set(key: &str, value: &str, json: bool) -> Result<()> {
+pub fn config_set(key: &str, value: &str, format: Format) -> Result<()> {
     let key = Key::parse(key)?;
     let mut file = ConfigFile::load()?;
     file.set(key, value)?;
@@ -31,7 +32,8 @@ pub fn config_set(key: &str, value: &str, json: bool) -> Result<()> {
     } else {
         file.get(key).unwrap_or_default().to_string()
     };
-    emit(
+    emit_own(
+        format,
         &json!({
             "path": path.display().to_string(),
             "key": key.name(),
@@ -39,7 +41,6 @@ pub fn config_set(key: &str, value: &str, json: bool) -> Result<()> {
             "secret": key.is_secret(),
             "shadowed_by_env": shadowed,
         }),
-        json,
         || {
             let mut line = format!("{} = {shown}  ->  {}", key.name(), path.display());
             if key.is_secret() {
@@ -59,7 +60,7 @@ pub fn config_set(key: &str, value: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn config_unset(key: &str, json: bool) -> Result<()> {
+pub fn config_unset(key: &str, format: Format) -> Result<()> {
     let key = Key::parse(key)?;
     let mut file = ConfigFile::load()?;
     let removed = file.unset(key);
@@ -67,13 +68,13 @@ pub fn config_unset(key: &str, json: bool) -> Result<()> {
         file.save()?;
     }
     let path = config::path()?;
-    emit(
+    emit_own(
+        format,
         &json!({
             "path": path.display().to_string(),
             "key": key.name(),
             "removed": removed,
         }),
-        json,
         || {
             if removed {
                 format!("{} removed from {}", key.name(), path.display())
@@ -85,14 +86,14 @@ pub fn config_unset(key: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn config_show(json: bool) -> Result<()> {
+pub fn config_show(format: Format) -> Result<()> {
     let file = ConfigFile::load()?;
     let path = config::path()?;
     let exists = path.exists();
     let rows = config::effective(&file);
 
     let path_text = path.display().to_string();
-    emit(&config_show_json(&path_text, exists, &rows), json, || {
+    emit_own(format, &config_show_json(&path_text, exists, &rows), || {
         output::config_show(&path_text, exists, &rows)
     });
     Ok(())
@@ -125,23 +126,76 @@ fn config_show_json(path: &str, exists: bool, rows: &[config::Resolved]) -> Valu
     })
 }
 
-pub fn config_path(json: bool) -> Result<()> {
+pub fn config_path(format: Format) -> Result<()> {
     let path = config::path()?.display().to_string();
-    emit(&json!({ "path": path }), json, || path.clone());
+    emit_own(format, &json!({ "path": path }), || path.clone());
     Ok(())
 }
 
 // ---- reads ----
 
-pub fn issue_get(reference: &str, json: bool) -> Result<()> {
+/// The expansion an issue read needs: the compact view also names the parent
+/// and the assignees, while the other two keep the body they always printed.
+fn issue_expand(format: Format) -> &'static str {
+    match format {
+        Format::Json => client::EXPAND_COMPACT,
+        Format::Text | Format::Raw => client::EXPAND_ISSUE,
+    }
+}
+
+fn list_expand(format: Format) -> &'static str {
+    match format {
+        Format::Json => client::EXPAND_COMPACT,
+        Format::Text | Format::Raw => client::EXPAND_LIST,
+    }
+}
+
+/// Module names by issue UUID, for the compact view. The issue record keeps
+/// answering `"module": null` because the relation lives in a join table, so
+/// this reads the modules and then the issue ids of each: one call per module,
+/// paid only under `--json`. Names are in module-name order.
+fn modules_by_issue(c: &Client, project_id: &str) -> Result<HashMap<String, Vec<String>>> {
+    let mut modules = c.modules(project_id)?;
+    modules.sort_by_key(|m| field(m, "name").to_lowercase());
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
+    for m in &modules {
+        for id in c.module_issue_ids(project_id, field(m, "id"))? {
+            map.entry(id)
+                .or_default()
+                .push(field(m, "name").to_string());
+        }
+    }
+    Ok(map)
+}
+
+/// The compact view of an issue already read with [`issue_expand`], with its
+/// modules looked up and its description as plain text.
+fn issue_compact_full(c: &Client, issue: &Value, r: &IssueRef) -> Result<Value> {
+    let modules = modules_by_issue(c, required_field(issue, "project", r.as_str())?)?;
+    let ctx = IssueContext {
+        identifier: r.identifier(),
+        workspace: c.workspace(),
+        modules: &modules,
+    };
+    Ok(output::issue_compact(issue, &ctx, true))
+}
+
+pub fn issue_get(reference: &str, format: Format) -> Result<()> {
     let c = Client::new()?;
     let r = IssueRef::parse(reference)?;
     // One call: the workspace-level identifier endpoint, state expanded in
     // place. No project lookup, no issue scan.
-    let issue = c.issue_by_ref(&r)?;
-    emit(&issue, json, || {
-        output::issue_detail(&issue, r.as_str(), c.workspace())
-    });
+    let issue = c.issue_by_ref_expanding(&r, issue_expand(format))?;
+    let compact = match format {
+        Format::Json => issue_compact_full(&c, &issue, &r)?,
+        Format::Text | Format::Raw => Value::Null,
+    };
+    emit(
+        format,
+        &issue,
+        || compact,
+        || output::issue_detail(&issue, r.as_str(), c.workspace()),
+    );
     Ok(())
 }
 
@@ -150,22 +204,23 @@ pub fn issue_list(
     state: Option<&str>,
     module: Option<&str>,
     label: Option<&str>,
-    json: bool,
+    format: Format,
 ) -> Result<()> {
     let c = Client::new()?;
     let proj = c.project_by_identifier(project)?;
     let project_id = field(&proj, "id").to_string();
     let identifier = field(&proj, "identifier").to_string();
+    let expand = list_expand(format);
 
     let (mut issues, mut heading) = match module {
         Some(name) => {
             let module = c.find_module(&project_id, name)?;
             (
-                c.module_issues(&project_id, field(&module, "id"))?,
+                c.module_issues(&project_id, field(&module, "id"), expand)?,
                 format!("{identifier} / {}", field(&module, "name")),
             )
         }
-        None => (c.issues(&project_id)?, identifier.clone()),
+        None => (c.issues(&project_id, expand)?, identifier.clone()),
     };
 
     if let Some(want) = state {
@@ -192,52 +247,88 @@ pub fn issue_list(
 
     issues.sort_by_key(|i| i.get("sequence_id").and_then(Value::as_i64).unwrap_or(0));
 
-    emit(&json!(issues), json, || {
-        output::issue_list(&issues, &identifier, &heading)
-    });
+    let modules = match format {
+        Format::Json => modules_by_issue(&c, &project_id)?,
+        Format::Text | Format::Raw => HashMap::new(),
+    };
+    let ctx = IssueContext {
+        identifier: &identifier,
+        workspace: c.workspace(),
+        modules: &modules,
+    };
+    emit(
+        format,
+        &json!(issues),
+        || {
+            json!(issues
+                .iter()
+                .map(|i| output::issue_compact(i, &ctx, false))
+                .collect::<Vec<_>>())
+        },
+        || output::issue_list(&issues, &identifier, &heading),
+    );
     Ok(())
 }
 
-pub fn project_list(json: bool) -> Result<()> {
+/// Map a list through its compact view, for the `--json` arm of [`emit`].
+fn compact_all(items: &[Value], f: fn(&Value) -> Value) -> Value {
+    Value::Array(items.iter().map(f).collect())
+}
+
+pub fn project_list(format: Format) -> Result<()> {
     let c = Client::new()?;
     let mut projects = c.projects()?;
     projects.sort_by_key(|p| field(p, "identifier").to_string());
-    emit(&json!(projects), json, || output::project_list(&projects));
+    emit(
+        format,
+        &json!(projects),
+        || compact_all(&projects, output::project_compact),
+        || output::project_list(&projects),
+    );
     Ok(())
 }
 
-pub fn module_list(project: &str, json: bool) -> Result<()> {
+pub fn module_list(project: &str, format: Format) -> Result<()> {
     let c = Client::new()?;
     let proj = c.project_by_identifier(project)?;
     let identifier = field(&proj, "identifier").to_string();
     let mut modules = c.modules(field(&proj, "id"))?;
     modules.sort_by_key(|m| field(m, "name").to_lowercase());
-    emit(&json!(modules), json, || {
-        output::module_list(&modules, &identifier)
-    });
+    emit(
+        format,
+        &json!(modules),
+        || compact_all(&modules, output::module_compact),
+        || output::module_list(&modules, &identifier),
+    );
     Ok(())
 }
 
-pub fn label_list(project: &str, json: bool) -> Result<()> {
+pub fn label_list(project: &str, format: Format) -> Result<()> {
     let c = Client::new()?;
     let proj = c.project_by_identifier(project)?;
     let identifier = field(&proj, "identifier").to_string();
     let mut labels = c.labels(field(&proj, "id"))?;
     labels.sort_by_key(|l| field(l, "name").to_lowercase());
-    emit(&json!(labels), json, || {
-        output::label_list(&labels, &identifier)
-    });
+    emit(
+        format,
+        &json!(labels),
+        || compact_all(&labels, output::label_compact),
+        || output::label_list(&labels, &identifier),
+    );
     Ok(())
 }
 
-pub fn state_list(project: &str, json: bool) -> Result<()> {
+pub fn state_list(project: &str, format: Format) -> Result<()> {
     let c = Client::new()?;
     let proj = c.project_by_identifier(project)?;
     let identifier = field(&proj, "identifier").to_string();
     let states = c.states(field(&proj, "id"))?;
-    emit(&json!(states), json, || {
-        output::state_list(&states, &identifier)
-    });
+    emit(
+        format,
+        &json!(states),
+        || compact_all(&states, output::state_compact),
+        || output::state_list(&states, &identifier),
+    );
     Ok(())
 }
 
@@ -255,7 +346,7 @@ pub struct CreateArgs {
     pub desc_md: Option<String>,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
-    pub json: bool,
+    pub format: Format,
 }
 
 pub fn issue_create(args: CreateArgs) -> Result<()> {
@@ -381,8 +472,28 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
         }
     }
 
-    if args.json {
-        emit(&created, true, String::new);
+    if args.format == Format::Raw {
+        emit(Format::Raw, &created, || Value::Null, String::new);
+    } else if args.format == Format::Json {
+        // The create response is unexpanded (state and labels are UUIDs) and
+        // predates the module attach, so the compact view is built from a
+        // re-read. Should that read fail, the issue still exists: print what
+        // the create response can say and warn, rather than an error that
+        // invites a retry and a duplicate.
+        let reread = IssueRef::parse(&reference).and_then(|r| {
+            let issue = c.issue_by_ref_expanding(&r, client::EXPAND_COMPACT)?;
+            issue_compact_full(&c, &issue, &r)
+        });
+        let view = reread.unwrap_or_else(|e| {
+            eprintln!("warning: {reference} was created, but reading it back failed: {e:#}");
+            let ctx = IssueContext {
+                identifier: identifier.as_deref().unwrap_or("?"),
+                workspace: c.workspace(),
+                modules: &HashMap::new(),
+            };
+            output::issue_compact(&created, &ctx, true)
+        });
+        println!("{}", output::compact_json(&view));
     } else {
         let mut out = format!("Created {reference}  {}", field(&created, "name"));
         if let Some(url) = output::issue_url(c.workspace(), &reference) {
@@ -570,7 +681,7 @@ pub struct UpdateArgs {
     pub module: Option<String>,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
-    pub json: bool,
+    pub format: Format,
 }
 
 /// Refuse an update that names no field, before any request is made.
@@ -643,18 +754,27 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
 
     // Re-read so the output shows resolved names rather than the UUIDs we
     // just wrote.
-    let updated = c.issue_by_ref(&r)?;
-    emit(&updated, args.json, || {
-        format!(
-            "Updated {}\n{}",
-            r.as_str(),
-            output::issue_detail(&updated, r.as_str(), c.workspace())
-        )
-    });
+    let updated = c.issue_by_ref_expanding(&r, issue_expand(args.format))?;
+    let compact = match args.format {
+        Format::Json => issue_compact_full(&c, &updated, &r)?,
+        Format::Text | Format::Raw => Value::Null,
+    };
+    emit(
+        args.format,
+        &updated,
+        || compact,
+        || {
+            format!(
+                "Updated {}\n{}",
+                r.as_str(),
+                output::issue_detail(&updated, r.as_str(), c.workspace())
+            )
+        },
+    );
     Ok(())
 }
 
-pub fn issue_comment(reference: &str, text: &str, json: bool) -> Result<()> {
+pub fn issue_comment(reference: &str, text: &str, format: Format) -> Result<()> {
     let c = Client::new()?;
     let r = IssueRef::parse(reference)?;
     let issue = c.issue_by_ref(&r)?;
@@ -664,13 +784,18 @@ pub fn issue_comment(reference: &str, text: &str, json: bool) -> Result<()> {
         required_field(&issue, "id", r.as_str())?,
         &markdown::to_html(&body),
     )?;
-    emit(&created, json, || format!("Commented on {}", r.as_str()));
+    emit(
+        format,
+        &created,
+        || output::comment_compact(&created, r.as_str()),
+        || format!("Commented on {}", r.as_str()),
+    );
     Ok(())
 }
 
 // ---- attachments ----
 
-pub fn issue_attach(reference: &str, files: &[PathBuf], json: bool) -> Result<()> {
+pub fn issue_attach(reference: &str, files: &[PathBuf], format: Format) -> Result<()> {
     let c = Client::new()?;
     let r = IssueRef::parse(reference)?;
     let issue = c.issue_by_ref(&r)?;
@@ -686,7 +811,7 @@ pub fn issue_attach(reference: &str, files: &[PathBuf], json: bool) -> Result<()
     for path in files {
         match attach_one(&c, &project_id, &issue_id, path, r.as_str()) {
             Ok(entry) => {
-                if !json {
+                if format == Format::Text {
                     println!("{}", attached_line(&entry, r.as_str()));
                 }
                 done.push(entry);
@@ -708,8 +833,10 @@ pub fn issue_attach(reference: &str, files: &[PathBuf], json: bool) -> Result<()
     }
 
     // The human lines are already out; only the JSON array is left to print.
-    if json {
-        emit(&json!(done), true, String::new);
+    // It is the flat shape under `--raw` too: the raw upload responses carry
+    // presigned credentials, and no single raw body describes the result.
+    if format != Format::Text {
+        emit_own(format, &json!(done), String::new);
     }
     Ok(())
 }
@@ -767,7 +894,7 @@ fn attached_line(entry: &Value, reference: &str) -> String {
     )
 }
 
-pub fn issue_attachments(reference: &str, json: bool) -> Result<()> {
+pub fn issue_attachments(reference: &str, format: Format) -> Result<()> {
     let c = Client::new()?;
     let r = IssueRef::parse(reference)?;
     let issue = c.issue_by_ref(&r)?;
@@ -776,10 +903,11 @@ pub fn issue_attachments(reference: &str, json: bool) -> Result<()> {
     let mut attachments = c.attachments(&project_id, &issue_id)?;
     attachments.sort_by_key(|a| field(a, "created_at").to_string());
 
-    // The same flat shape `attach --json` emits, rather than Plane's raw
-    // asset objects: one entity described one way, whichever command asked.
-    // The rendered table still reads the raw objects, because `is_uploaded`
-    // is a display concern that has no place in the flat shape.
+    // Under `--json`, the same flat shape `attach --json` emits: one entity
+    // described one way, whichever command asked. `--raw` prints Plane's
+    // asset objects as they came back. The rendered table reads the raw
+    // objects, because `is_uploaded` is a display concern that has no place
+    // in the flat shape.
     let flat: Vec<Value> = attachments
         .iter()
         .map(|a| {
@@ -789,9 +917,12 @@ pub fn issue_attachments(reference: &str, json: bool) -> Result<()> {
             )
         })
         .collect();
-    emit(&json!(flat), json, || {
-        output::attachment_list(&attachments, r.as_str())
-    });
+    emit(
+        format,
+        &json!(attachments),
+        || json!(flat),
+        || output::attachment_list(&attachments, r.as_str()),
+    );
     Ok(())
 }
 
@@ -978,7 +1109,7 @@ mod tests {
             module: None,
             labels: Vec::new(),
             assignees: Vec::new(),
-            json: false,
+            format: Format::Text,
         }
     }
 
