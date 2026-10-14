@@ -190,6 +190,11 @@ enum IssueCmd {
         #[arg(long)]
         module: Option<String>,
 
+        /// New description as markdown; `-` reads stdin. Converted to HTML on
+        /// write, and replaces the whole description.
+        #[arg(long, value_name = "MARKDOWN")]
+        desc_md: Option<String>,
+
         /// Label to set, by name. Repeatable, and replaces the issue's
         /// current labels rather than adding to them.
         #[arg(long = "label", value_name = "LABEL")]
@@ -314,6 +319,7 @@ fn main() {
                 due,
                 title,
                 module,
+                desc_md,
                 labels,
                 assignees,
             } => cmd::issue_update(cmd::UpdateArgs {
@@ -324,6 +330,7 @@ fn main() {
                 due,
                 title,
                 module,
+                desc_md,
                 labels,
                 assignees,
                 format,

@@ -679,6 +679,7 @@ pub struct UpdateArgs {
     pub due: Option<String>,
     pub title: Option<String>,
     pub module: Option<String>,
+    pub desc_md: Option<String>,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
     pub format: Format,
@@ -692,10 +693,11 @@ fn check_something_to_update(args: &UpdateArgs) -> Result<()> {
         && args.due.is_none()
         && args.title.is_none()
         && args.module.is_none()
+        && args.desc_md.is_none()
         && args.labels.is_empty()
         && args.assignees.is_empty()
     {
-        bail!("Nothing to update. Pass at least one of --state, --priority, --start, --due, --title, --module, --label, --assignee.");
+        bail!("Nothing to update. Pass at least one of --state, --priority, --start, --due, --title, --module, --desc-md, --label, --assignee.");
     }
     Ok(())
 }
@@ -705,6 +707,12 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
     let start_date = DateWrite::parse(args.start.as_deref())?;
     let target_date = DateWrite::parse(args.due.as_deref())?;
     check_date_order(&start_date, &target_date)?;
+    // Read before any request, so a stdin that cannot be read costs no call.
+    // The description is replaced whole: Plane has no append.
+    let description_html = match &args.desc_md {
+        Some(md) => Some(markdown::to_html(&read_markdown(md)?)),
+        None => None,
+    };
 
     let c = Client::new()?;
     let r = IssueRef::parse(&args.reference)?;
@@ -718,6 +726,7 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
     // array, and a second invocation is a fresh set, not a second helping.
     let body = write_body(IssueFields {
         name: args.title.clone(),
+        description_html,
         state_id: match &args.state {
             Some(s) => Some(c.resolve_state(&project_id, s)?),
             None => None,
@@ -736,7 +745,6 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
             true => None,
             false => Some(resolve_assignee_ids(&c, &project_id, &args.assignees)?),
         },
-        ..IssueFields::default()
     });
 
     if !body.is_empty() {
@@ -1107,6 +1115,7 @@ mod tests {
             due: None,
             title: None,
             module: None,
+            desc_md: None,
             labels: Vec::new(),
             assignees: Vec::new(),
             format: Format::Text,
@@ -1127,6 +1136,34 @@ mod tests {
             ..update_args()
         };
         assert!(check_something_to_update(&args).is_ok());
+    }
+
+    #[test]
+    fn a_description_alone_is_something_to_update() {
+        let err = check_something_to_update(&update_args())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("--desc-md"), "{err}");
+        let args = UpdateArgs {
+            desc_md: Some("-".into()),
+            ..update_args()
+        };
+        assert!(check_something_to_update(&args).is_ok());
+    }
+
+    #[test]
+    fn a_description_is_written_as_html_under_description_html() {
+        // The same conversion `create` uses: markdown sent as-is would be
+        // stored literally, asterisks and all.
+        let body = write_body(IssueFields {
+            description_html: Some(markdown::to_html(&read_markdown("**bold**").unwrap())),
+            ..IssueFields::default()
+        });
+        assert_eq!(body.keys().collect::<Vec<_>>(), vec!["description_html"]);
+        assert_eq!(
+            body["description_html"],
+            json!("<p><strong>bold</strong></p>\n")
+        );
     }
 
     #[test]

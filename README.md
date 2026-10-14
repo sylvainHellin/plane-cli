@@ -99,7 +99,7 @@ plane issue get RES-12
 plane issue list RES [--state todo] [--module "Paper 2 Drawings"] [--label deep]
 plane issue create RES "title" [--module M] [--state S] [--priority P] [--start YYYY-MM-DD] [--due YYYY-MM-DD] [--label L ...] [--assignee P ...] [--desc-md -]
 plane issue create --from-note <note.md> "title" [...]
-plane issue update RES-12 [--state|--priority|--start|--due|--title|--module|--label|--assignee]
+plane issue update RES-12 [--state|--priority|--start|--due|--title|--module|--label|--assignee|--desc-md -]
 plane issue comment RES-12 "text"
 plane issue attach RES-12 <file> [<file> ...]
 plane issue attachments RES-12
@@ -155,6 +155,17 @@ On `update`, `none` (any case) clears the date: the PATCH carries an explicit `n
 On `create` there is nothing to clear, so `none` is an error rather than a silently omitted date.
 When one call sets both, a start after the due date is refused before anything is sent; the dates already stored on the issue are not checked.
 Issue reads show a `start:` line above `due:`.
+
+### Descriptions
+
+`--desc-md` takes markdown on `create` and `update`, either inline or `-` to read stdin, and converts it to the HTML Plane stores in `description_html`.
+
+```
+plane issue update RES-12 --desc-md - < /tmp/desc.md
+```
+
+On `update` it replaces the whole description, since Plane has no append.
+The argument is text, never a path: `--desc-md /tmp/desc.md` stores that path as the description.
 
 ### Labels
 
