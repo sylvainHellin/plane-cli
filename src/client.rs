@@ -44,6 +44,14 @@ pub const PRIORITIES: [&str; 5] = ["urgent", "high", "medium", "low", "none"];
 /// covers a whole file crossing the wire, not a JSON round trip.
 const UPLOAD_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// Backoff between retries of a 429 that carries no usable `Retry-After`.
+/// They sum to 62 s, so the last retry lands after the 60 s window has rolled.
+const RATE_LIMIT_BACKOFF: [u64; 5] = [2, 4, 8, 16, 32];
+/// Ceiling on the total time spent waiting out 429s for one request. A
+/// `Retry-After` that would push past it is not honoured; the request fails
+/// instead of pausing the caller longer than one rate-limit window.
+const RATE_LIMIT_BUDGET: Duration = Duration::from_secs(65);
+
 pub struct Client {
     http: reqwest::blocking::Client,
     /// A second client for the presigned upload, which goes to the object
@@ -53,6 +61,9 @@ pub struct Client {
     base: String,
     workspace: String,
     key: String,
+    /// How a rate-limit wait is spent. `thread::sleep` in the binary; tests
+    /// swap in a no-op so the retry loop runs without waiting.
+    sleep: fn(Duration),
 }
 
 impl Client {
@@ -84,6 +95,7 @@ impl Client {
             base,
             workspace,
             key: auth::api_key()?,
+            sleep: std::thread::sleep,
         })
     }
 
@@ -104,11 +116,44 @@ impl Client {
         format!("{}/workspaces/{}/{}", self.base, self.workspace, path)
     }
 
+    /// Send a request, waiting out 429s transparently.
+    ///
+    /// A 429 means Plane rejected the request without acting on it, so a
+    /// retry is safe for writes too. Nothing else is retried. Each wait
+    /// prints one line to stderr, keeping stdout clean for `--json`.
     fn send(&self, req: reqwest::blocking::RequestBuilder) -> Result<Value> {
-        let resp = req
-            .header("X-API-Key", &self.key)
-            .send()
-            .context("Request to Plane failed. Is the instance reachable?")?;
+        let req = req.header("X-API-Key", &self.key);
+        let mut waited = Duration::ZERO;
+        let mut retries = 0usize;
+        loop {
+            // Every body sent through here is JSON or empty, so the clone
+            // always succeeds; a streaming body would just go out once.
+            let Some(attempt) = req.try_clone() else {
+                return self.read(req.send());
+            };
+            let resp = attempt.send();
+            if let Ok(r) = &resp {
+                if r.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+                    let retry_after = r
+                        .headers()
+                        .get(reqwest::header::RETRY_AFTER)
+                        .and_then(|v| v.to_str().ok());
+                    if let Some(delay) = rate_limit_delay(retries, retry_after, waited) {
+                        eprintln!("plane: rate limited, retrying in {}s", delay.as_secs());
+                        (self.sleep)(delay);
+                        waited += delay;
+                        retries += 1;
+                        continue;
+                    }
+                }
+            }
+            return self.read(resp);
+        }
+    }
+
+    /// Turn one response into the parsed body or an explained error.
+    fn read(&self, resp: reqwest::Result<reqwest::blocking::Response>) -> Result<Value> {
+        let resp = resp.context("Request to Plane failed. Is the instance reachable?")?;
         let status = resp.status();
         let location = resp
             .headers()
@@ -644,6 +689,28 @@ fn find_member<'a>(members: &'a [Value], name: &str) -> Result<&'a Value> {
     }
 }
 
+/// How long to wait before retrying a 429, or `None` to give up.
+///
+/// `retries` is how many retries already happened and `waited` how long they
+/// slept in total. A `Retry-After` in whole seconds wins over the backoff
+/// table (an HTTP-date one is ignored, since Plane sends seconds); either way
+/// the total stays within [`RATE_LIMIT_BUDGET`]. Pure, so the policy is
+/// tested without sleeping.
+fn rate_limit_delay(
+    retries: usize,
+    retry_after: Option<&str>,
+    waited: Duration,
+) -> Option<Duration> {
+    let backoff = *RATE_LIMIT_BACKOFF.get(retries)?;
+    let secs = retry_after
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        // `Retry-After: 0` would retry into the same window at once.
+        .map(|s| s.max(1))
+        .unwrap_or(backoff);
+    let delay = Duration::from_secs(secs);
+    (waited + delay <= RATE_LIMIT_BUDGET).then_some(delay)
+}
+
 /// Decide the cursor for the next page, or `None` when the list is done.
 ///
 /// Split out of the loop so the stuck-cursor guard is testable without a
@@ -767,6 +834,179 @@ impl IssueRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::RefCell;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    fn secs(s: u64) -> Duration {
+        Duration::from_secs(s)
+    }
+
+    #[test]
+    fn rate_limit_backs_off_then_gives_up_within_the_budget() {
+        let mut waited = Duration::ZERO;
+        let mut delays = Vec::new();
+        let mut retries = 0;
+        while let Some(d) = rate_limit_delay(retries, None, waited) {
+            delays.push(d.as_secs());
+            waited += d;
+            retries += 1;
+        }
+        assert_eq!(delays, [2, 4, 8, 16, 32]);
+        assert!(waited <= RATE_LIMIT_BUDGET);
+    }
+
+    #[test]
+    fn rate_limit_honours_retry_after_seconds() {
+        assert_eq!(
+            rate_limit_delay(0, Some("10"), Duration::ZERO),
+            Some(secs(10))
+        );
+        assert_eq!(rate_limit_delay(3, Some(" 7 "), secs(14)), Some(secs(7)));
+        // Zero would retry into the same window at once.
+        assert_eq!(
+            rate_limit_delay(0, Some("0"), Duration::ZERO),
+            Some(secs(1))
+        );
+    }
+
+    #[test]
+    fn rate_limit_falls_back_to_backoff_on_an_unparsable_retry_after() {
+        let date = "Wed, 21 Oct 2015 07:28:00 GMT";
+        assert_eq!(rate_limit_delay(2, Some(date), secs(6)), Some(secs(8)));
+        assert_eq!(rate_limit_delay(0, Some(""), Duration::ZERO), Some(secs(2)));
+    }
+
+    #[test]
+    fn rate_limit_refuses_a_retry_after_past_the_budget() {
+        assert_eq!(rate_limit_delay(0, Some("120"), Duration::ZERO), None);
+        assert_eq!(rate_limit_delay(1, Some("60"), secs(60)), None);
+        assert_eq!(rate_limit_delay(1, Some("5"), secs(60)), Some(secs(5)));
+    }
+
+    thread_local! {
+        static SLEPT: RefCell<Vec<Duration>> = const { RefCell::new(Vec::new()) };
+    }
+
+    fn record_sleep(d: Duration) {
+        SLEPT.with(|s| s.borrow_mut().push(d));
+    }
+
+    fn slept() -> Vec<u64> {
+        SLEPT.with(|s| s.borrow().iter().map(Duration::as_secs).collect())
+    }
+
+    /// Serve one canned HTTP response per connection, in order, and hand back
+    /// what each request was: its request line and its body.
+    fn serve(responses: Vec<String>) -> (String, std::thread::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let handle = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line.trim().is_empty() {
+                        break;
+                    }
+                    if let Some((k, v)) = line.split_once(':') {
+                        if k.eq_ignore_ascii_case("content-length") {
+                            length = v.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                seen.push((
+                    request_line.trim().to_string(),
+                    String::from_utf8(body).unwrap(),
+                ));
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+            seen
+        });
+        (base, handle)
+    }
+
+    fn response(status: &str, extra_headers: &str, body: &str) -> String {
+        format!(
+            "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n{extra_headers}\r\n{body}",
+            body.len()
+        )
+    }
+
+    const LIMITED: &str = r#"{"error_code":5900,"error_message":"RATE_LIMIT_EXCEEDED"}"#;
+
+    fn test_client(base: &str) -> Client {
+        let http = reqwest::blocking::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+        Client {
+            uploader: http.clone(),
+            http,
+            base: base.to_string(),
+            workspace: "ws".to_string(),
+            key: "test-key".to_string(),
+            sleep: record_sleep,
+        }
+    }
+
+    #[test]
+    fn send_retries_a_429_and_resends_the_write() {
+        let (base, server) = serve(vec![
+            response("429 Too Many Requests", "Retry-After: 3\r\n", LIMITED),
+            response("429 Too Many Requests", "", LIMITED),
+            response("201 Created", "", r#"{"id":"x"}"#),
+        ]);
+        let c = test_client(&base);
+        let out = c.post("issues/", &json!({"name": "n"})).unwrap();
+        assert_eq!(out, json!({"id": "x"}));
+        // Retry-After first, then the backoff table's second step.
+        assert_eq!(slept(), [3, 4]);
+        let seen = server.join().unwrap();
+        assert_eq!(seen.len(), 3);
+        for (line, body) in &seen {
+            assert!(line.starts_with("POST /workspaces/ws/issues/ "), "{line}");
+            assert_eq!(body, r#"{"name":"n"}"#);
+        }
+    }
+
+    #[test]
+    fn send_gives_up_on_a_429_after_the_budget() {
+        let responses = (0..=RATE_LIMIT_BACKOFF.len())
+            .map(|_| response("429 Too Many Requests", "", LIMITED))
+            .collect();
+        let (base, server) = serve(responses);
+        let err = test_client(&base).get("projects/", &[]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("429 Too Many Requests"), "{msg}");
+        assert!(msg.contains("RATE_LIMIT_EXCEEDED"), "{msg}");
+        assert!(msg.contains("wait a minute and retry"), "{msg}");
+        assert_eq!(slept(), [2, 4, 8, 16, 32]);
+        assert_eq!(server.join().unwrap().len(), RATE_LIMIT_BACKOFF.len() + 1);
+    }
+
+    #[test]
+    fn send_does_not_retry_other_errors() {
+        let (base, server) = serve(vec![response(
+            "500 Internal Server Error",
+            "",
+            r#"{"error":"boom"}"#,
+        )]);
+        let err = test_client(&base)
+            .patch("issues/x/", &json!({}))
+            .unwrap_err();
+        assert!(err.to_string().contains("500"), "{err}");
+        assert!(slept().is_empty());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
 
     #[test]
     fn issue_ref_uppercases_the_identifier() {

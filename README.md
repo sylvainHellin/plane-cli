@@ -264,7 +264,7 @@ Everything below was verified against a running CE instance and is encoded once 
 | only project members are assignable, and `assignees` takes their user UUIDs | `--assignee` resolves a name against `projects/<id>/members/`, and `?expand=assignees` reads them back |
 | attachments live under `work-items/`, not `issues/` | the `issues/` spelling 404s, while issue CRUD and comments need `issues/` |
 | the presigned upload host follows the API host | attaching works remotely, not only from the server itself |
-| 60 requests per minute per PAT | a 429 says so instead of surfacing a bare status code |
+| 60 requests per minute per PAT | a 429 is retried after `Retry-After`, else after 2, 4, 8, 16 and 32 s, at most about 65 s in all, with one `plane: rate limited, retrying in Ns` line on stderr per wait; past that it fails and says so |
 
 ## Using it against a remote instance
 
