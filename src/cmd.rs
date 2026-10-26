@@ -403,7 +403,9 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
         module_label = Some(name.clone());
     }
 
-    let label_ids = match args.labels.is_empty() {
+    // `--label none` on a new issue has nothing to clear, so it means what
+    // leaving the flag out means: no labels, and no `labels` key in the body.
+    let label_ids = match args.labels.is_empty() || is_sole_none(&args.labels) {
         true => None,
         false => Some(resolve_label_ids(&c, &project_id, &args.labels)?),
     };
@@ -630,13 +632,26 @@ fn write_body(f: IssueFields) -> Map<String, Value> {
     body
 }
 
+/// Whether a repeatable name flag was given exactly once as `none`, in any
+/// case and with surrounding whitespace: the spelling of the empty set, which
+/// a list of names cannot otherwise express.
+fn is_sole_none(names: &[String]) -> bool {
+    matches!(names, [sole] if sole.trim().eq_ignore_ascii_case("none"))
+}
+
 /// Resolve label names to the UUIDs the API writes, in one fetch.
 ///
 /// Named for what it does rather than for `label_ids`, which is the request
 /// key that looks plausible, is accepted with a 200, and is silently ignored:
 /// verified against a live instance, where a `label_ids` PATCH left the issue
 /// with no labels at all.
+///
+/// A single `--label none` resolves to the empty list, mirroring
+/// `--assignee none`, so an update writes `labels: []` and clears them.
 fn resolve_label_ids(c: &Client, project_id: &str, names: &[String]) -> Result<Vec<String>> {
+    if is_sole_none(names) {
+        return Ok(Vec::new());
+    }
     c.find_labels(project_id, names)?
         .iter()
         .map(|l| {
@@ -1040,6 +1055,32 @@ mod tests {
         assert!(body.contains_key("labels"), "{body:?}");
         assert!(!body.contains_key("label_ids"), "{body:?}");
         assert_eq!(body["labels"], json!(["aaa", "bbb"]));
+    }
+
+    #[test]
+    fn a_sole_none_is_the_empty_set_in_any_case() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        for spelling in ["none", "None", "NONE", " none ", "\tnone\n"] {
+            assert!(is_sole_none(&names(&[spelling])), "{spelling:?}");
+        }
+        // Only a lone `none` clears: next to a real name it is just a name,
+        // which then fails to resolve rather than silently dropping the rest.
+        assert!(!is_sole_none(&names(&["none", "deep"])));
+        assert!(!is_sole_none(&names(&["deep"])));
+        assert!(!is_sole_none(&names(&["nonexistent"])));
+        assert!(!is_sole_none(&[]));
+    }
+
+    #[test]
+    fn clearing_labels_writes_an_empty_labels_array() {
+        // `--label none` on update: the key must be present with `[]`, since
+        // an absent key leaves the labels alone instead of clearing them.
+        let body = write_body(IssueFields {
+            label_ids: Some(Vec::new()),
+            ..IssueFields::default()
+        });
+        assert_eq!(body.get("labels"), Some(&json!([])), "{body:?}");
+        assert_eq!(body.len(), 1, "{body:?}");
     }
 
     #[test]

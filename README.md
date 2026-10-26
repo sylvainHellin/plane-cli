@@ -174,10 +174,13 @@ On `list` it is single-valued, matching `--state`: one label filters usefully, a
 
 ```
 plane issue update RES-12 --label waiting --label deep
+plane issue update RES-12 --label none        # clear every label
 ```
 
 On `update` it **replaces** the issue's label set rather than adding to it, because that is what CE's `labels` field does: patching one label onto an issue carrying two leaves it with one.
-So every label an issue should end up with goes into the same invocation, and dropping all labels is not expressible through this flag today.
+So every label an issue should end up with goes into the same invocation.
+The empty set is the one thing a name list cannot spell, so a single `--label none` (any case) writes an empty `labels` array and clears the field, like `--assignee none`.
+On `create` it means no labels, the same as leaving the flag out.
 
 Labels are per project, so the same four names exist once per board as four different UUIDs; `plane label list RES` prints the ones that project really has.
 

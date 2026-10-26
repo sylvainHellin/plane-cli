@@ -151,7 +151,7 @@ enum IssueCmd {
         #[arg(long, value_name = "MARKDOWN")]
         desc_md: Option<String>,
 
-        /// Label to set, by name. Repeatable.
+        /// Label to set, by name. Repeatable. `--label none` means no labels.
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
 
@@ -196,7 +196,8 @@ enum IssueCmd {
         desc_md: Option<String>,
 
         /// Label to set, by name. Repeatable, and replaces the issue's
-        /// current labels rather than adding to them.
+        /// current labels rather than adding to them. A single
+        /// `--label none` clears them.
         #[arg(long = "label", value_name = "LABEL")]
         labels: Vec<String>,
 
