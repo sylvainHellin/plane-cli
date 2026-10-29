@@ -101,6 +101,7 @@ plane issue create RES "title" [--module M] [--state S] [--priority P] [--start 
 plane issue create --from-note <note.md> "title" [...]
 plane issue update RES-12 [--state|--priority|--start|--due|--title|--module|--label|--assignee|--desc-md -]
 plane issue comment RES-12 "text"
+plane issue comments RES-12
 plane issue attach RES-12 <file> [<file> ...]
 plane issue attachments RES-12
 plane project list
@@ -130,7 +131,7 @@ An issue under `--json` carries these keys, `null` where a value is unset:
 `modules` costs one extra call per module of the project, because the issue record does not say which modules hold it.
 Projects print `identifier`, `name`, `id`; modules `name`, `status`, `start`, `due`, `id`; states `name`, `group`; labels `name`, `color`.
 The project and module UUIDs stay because a bridged note's frontmatter takes them back (see `--from-note`).
-A comment prints `issue`, `text`, `created_at`.
+A comment prints `issue`, `text`, `created_at`; `issue comments` adds `author`, the display name of whoever wrote it.
 
 List commands print a bare JSON array with every page already merged into it, so `jq '.[]'` walks a list the same way `jq .name` reads a single object.
 There is no `{count, results}` envelope to unwrap: a list is fetched across as many pages as the cursor takes, so no single raw body exists to print anyway, and `jq 'length'` gives the count.
@@ -166,6 +167,24 @@ plane issue update RES-12 --desc-md - < /tmp/desc.md
 
 On `update` it replaces the whole description, since Plane has no append.
 The argument is text, never a path: `--desc-md /tmp/desc.md` stores that path as the description.
+
+### Comments
+
+`issue comments` lists every comment of an issue, oldest first, across every page.
+Each one prints as a header line with its time in UTC and its author's display name, then the body as plain text.
+
+```
+PERSO-230: 2 comments
+
+[1] 2026-10-27 08:28 UTC, jean-claude
+Proton Drive Pictures folder checked on the Mac (2026-10-27):
+
+- 31,763 files, 50.8 GB
+```
+
+The body comes from `comment_html`, since CE's API does not hand back a usable `comment_stripped` (absent or `null`).
+The same flattening serves descriptions: paragraphs are separated by a blank line as in markdown, list items become `- ` or `1. ` lines indented by depth, task items carry `[ ]` or `[x]`, a link keeps its target in parentheses, and entities are decoded.
+The author comes from `?expand=actor`, so the listing costs no call beyond the issue lookup and the comment pages.
 
 ### Labels
 
@@ -290,4 +309,4 @@ Attachments work remotely too: the presigned upload URL is derived from the host
 ## Not in v2
 
 Cycles, pages, worklogs, initiatives.
-Still raw-API territory: creating labels, projects, and modules, deleting anything, and reading comments back.
+Still raw-API territory: creating labels, projects, and modules, deleting anything, and editing or deleting comments.

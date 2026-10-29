@@ -217,6 +217,12 @@ enum IssueCmd {
         text: String,
     },
 
+    /// List the comments of an issue, oldest first
+    Comments {
+        /// Issue reference, e.g. RES-12
+        reference: String,
+    },
+
     /// Upload one or more files to an issue
     Attach {
         /// Issue reference, e.g. RES-12
@@ -337,6 +343,7 @@ fn main() {
                 format,
             }),
             IssueCmd::Comment { reference, text } => cmd::issue_comment(&reference, &text, format),
+            IssueCmd::Comments { reference } => cmd::issue_comments(&reference, format),
             IssueCmd::Attach { reference, files } => cmd::issue_attach(&reference, &files, format),
             IssueCmd::Attachments { reference } => cmd::issue_attachments(&reference, format),
         },

@@ -461,6 +461,16 @@ impl Client {
         )
     }
 
+    /// Every comment of an issue, every page merged, with `actor` expanded in
+    /// place so the author's name comes with it. The order is whatever Plane
+    /// returns; callers sort.
+    pub fn comments(&self, project_id: &str, issue_id: &str) -> Result<Vec<Value>> {
+        self.get_all(
+            &format!("projects/{project_id}/issues/{issue_id}/comments/"),
+            &[("expand", "actor")],
+        )
+    }
+
     pub fn create_comment(
         &self,
         project_id: &str,

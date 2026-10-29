@@ -211,6 +211,67 @@ pub fn comment_compact(comment: &Value, reference: &str) -> Value {
     })
 }
 
+/// A comment as `issue comments --json` lists it: [`comment_compact`] plus
+/// who wrote it, which the listing can say because it expands `actor`.
+pub fn comment_listed(comment: &Value, reference: &str) -> Value {
+    let mut out = comment_compact(comment, reference);
+    out["author"] = match comment_author(comment) {
+        "" => Value::Null,
+        a => json!(a),
+    };
+    out
+}
+
+/// The author of a comment fetched with `?expand=actor`: the display name,
+/// else the first name, else `""` when `actor` is still a bare UUID.
+pub fn comment_author(comment: &Value) -> &str {
+    let Some(actor) = comment.get("actor").filter(|a| a.is_object()) else {
+        return "";
+    };
+    [field(actor, "display_name"), field(actor, "first_name")]
+        .into_iter()
+        .find(|s| !s.is_empty())
+        .unwrap_or("")
+}
+
+/// `2026-05-17T09:12:33.123456Z` as `2026-05-17 09:12 UTC`.
+///
+/// Plane stores UTC, so a zero offset is spelled `UTC`; any other offset is
+/// kept as written rather than converted, since there is no time zone library
+/// here and a wrong conversion is worse than an unconverted time.
+pub fn comment_time(ts: &str) -> String {
+    if ts.len() < 16 || ts.as_bytes().get(10) != Some(&b'T') {
+        return ts.to_string();
+    }
+    let minute = format!("{} {}", &ts[..10], &ts[11..16]);
+    let zone = ts[16..].trim_start_matches(|c: char| c == ':' || c == '.' || c.is_ascii_digit());
+    match zone {
+        "Z" | "+00:00" | "" => format!("{minute} UTC"),
+        other => format!("{minute} {other}"),
+    }
+}
+
+/// The comments of one issue, oldest first: a header line per comment with
+/// its time and author, then the body as plain text.
+pub fn comment_list(comments: &[Value], reference: &str) -> String {
+    if comments.is_empty() {
+        return format!("{reference}: no comments");
+    }
+    let n = comments.len();
+    let mut out = format!("{reference}: {n} comment{}", if n == 1 { "" } else { "s" });
+    for (i, cm) in comments.iter().enumerate() {
+        let mut header = format!("[{}] {}", i + 1, comment_time(field(cm, "created_at")));
+        let author = comment_author(cm);
+        if !author.is_empty() {
+            header.push_str(&format!(", {author}"));
+        }
+        let body = markdown::to_text(field(cm, "comment_html"));
+        let body = if body.is_empty() { "(empty)" } else { &body };
+        out.push_str(&format!("\n\n{header}\n{body}"));
+    }
+    out
+}
+
 /// A string field, or `""` when absent or null.
 pub fn field<'a>(v: &'a Value, key: &str) -> &'a str {
     v.get(key).and_then(Value::as_str).unwrap_or("")
@@ -863,7 +924,7 @@ mod tests {
         assert_eq!(out["due"], Value::Null);
         assert_eq!(out["completed_at"], Value::Null);
         assert_eq!(out["parent"], json!("RES-4"));
-        assert_eq!(out["description"], json!("First & second\nThird"));
+        assert_eq!(out["description"], json!("First & second\n\nThird"));
         assert!(
             !out.to_string().contains("uuid"),
             "no UUID may leak into the compact view: {out}"
@@ -955,6 +1016,53 @@ mod tests {
         );
         let l = json!({"id": "l1", "name": "deep", "color": "#000", "project": "p1"});
         assert_eq!(label_compact(&l), json!({"name": "deep", "color": "#000"}));
+    }
+
+    #[test]
+    fn comment_times_read_as_minutes_in_utc() {
+        assert_eq!(
+            comment_time("2026-10-27T08:28:11.091539Z"),
+            "2026-10-27 08:28 UTC"
+        );
+        assert_eq!(
+            comment_time("2026-10-27T08:28:11+00:00"),
+            "2026-10-27 08:28 UTC"
+        );
+        assert_eq!(
+            comment_time("2026-10-27T10:28:11.5+02:00"),
+            "2026-10-27 10:28 +02:00"
+        );
+        // Anything unexpected passes through rather than being mangled.
+        assert_eq!(comment_time("yesterday"), "yesterday");
+        assert_eq!(comment_time(""), "");
+    }
+
+    #[test]
+    fn a_comment_list_has_a_header_per_comment_and_plain_bodies() {
+        let comments = vec![
+            json!({"created_at": "2026-10-27T08:28:11Z",
+                   "actor": {"display_name": "jean-claude", "first_name": "Jean-Claude"},
+                   "comment_html": "<p>One &amp; two</p><ul><li>a</li><li>b</li></ul>"}),
+            json!({"created_at": "2026-10-28T10:49:56Z", "actor": "a-uuid",
+                   "comment_html": ""}),
+        ];
+        assert_eq!(
+            comment_list(&comments, "PERSO-230"),
+            "PERSO-230: 2 comments\n\n[1] 2026-10-27 08:28 UTC, jean-claude\nOne & two\n\n- a\n- b\n\n[2] 2026-10-28 10:49 UTC\n(empty)"
+        );
+        assert_eq!(comment_list(&[], "PERSO-1"), "PERSO-1: no comments");
+    }
+
+    #[test]
+    fn a_listed_comment_names_its_author_or_null() {
+        let c = json!({"comment_html": "<p>x</p>", "created_at": "2026-10-27T08:28:11Z",
+                       "actor": {"display_name": "", "first_name": "Robin"}});
+        assert_eq!(
+            comment_listed(&c, "RES-1"),
+            json!({"issue": "RES-1", "text": "x", "created_at": "2026-10-27T08:28:11Z", "author": "Robin"})
+        );
+        let bare = json!({"comment_html": "<p>x</p>", "actor": "a-uuid"});
+        assert_eq!(comment_listed(&bare, "RES-1")["author"], Value::Null);
     }
 
     #[test]

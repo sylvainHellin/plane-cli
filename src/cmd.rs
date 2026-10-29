@@ -816,6 +816,30 @@ pub fn issue_comment(reference: &str, text: &str, format: Format) -> Result<()> 
     Ok(())
 }
 
+/// Every comment of an issue, oldest first.
+pub fn issue_comments(reference: &str, format: Format) -> Result<()> {
+    let c = Client::new()?;
+    let r = IssueRef::parse(reference)?;
+    let issue = c.issue_by_ref(&r)?;
+    let project_id = required_field(&issue, "project", r.as_str())?.to_string();
+    let issue_id = required_field(&issue, "id", r.as_str())?.to_string();
+    let mut comments = c.comments(&project_id, &issue_id)?;
+    // ISO 8601 timestamps from one server sort chronologically as strings.
+    comments.sort_by_key(|cm| field(cm, "created_at").to_string());
+    emit(
+        format,
+        &json!(comments),
+        || {
+            json!(comments
+                .iter()
+                .map(|cm| output::comment_listed(cm, r.as_str()))
+                .collect::<Vec<_>>())
+        },
+        || output::comment_list(&comments, r.as_str()),
+    );
+    Ok(())
+}
+
 // ---- attachments ----
 
 pub fn issue_attach(reference: &str, files: &[PathBuf], format: Format) -> Result<()> {
