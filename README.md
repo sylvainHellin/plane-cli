@@ -97,9 +97,9 @@ Other credential spellings (`token`, `pat`, `secret`, ...) are not keys, and the
 ```
 plane issue get RES-12
 plane issue list RES [--state todo] [--module "Paper 2 Drawings"] [--label deep]
-plane issue create RES "title" [--module M] [--state S] [--priority P] [--start YYYY-MM-DD] [--due YYYY-MM-DD] [--label L ...] [--assignee P ...] [--desc-md -]
+plane issue create RES "title" [--module M] [--state S] [--priority P] [--start YYYY-MM-DD] [--due YYYY-MM-DD] [--label L ...] [--assignee P ...] [--desc-md TEXT|- | --desc-file PATH]
 plane issue create --from-note <note.md> "title" [...]
-plane issue update RES-12 [--state|--priority|--start|--due|--title|--module|--label|--assignee|--desc-md -]
+plane issue update RES-12 [--state|--priority|--start|--due|--title|--module|--label|--assignee|--desc-md|--desc-file]
 plane issue comment RES-12 "text"
 plane issue comments RES-12
 plane issue attach RES-12 <file> [<file> ...]
@@ -159,14 +159,21 @@ Issue reads show a `start:` line above `due:`.
 
 ### Descriptions
 
-`--desc-md` takes markdown on `create` and `update`, either inline or `-` to read stdin, and converts it to the HTML Plane stores in `description_html`.
+Two options set the description on `create` and `update`, and both convert markdown to the HTML Plane stores in `description_html`.
+`--desc-md` takes the markdown text itself, or `-` to read stdin.
+`--desc-file` takes the path of a markdown file, or `-` for stdin as well.
 
 ```
+plane issue update RES-12 --desc-file /tmp/desc.md
 plane issue update RES-12 --desc-md - < /tmp/desc.md
+plane issue update RES-12 --desc-md "One **short** line."
 ```
 
-On `update` it replaces the whole description, since Plane has no append.
-The argument is text, never a path: `--desc-md /tmp/desc.md` stores that path as the description.
+On `update` either one replaces the whole description, since Plane has no append.
+Passing both is an error.
+`--desc-md` refuses a lone file path rather than storing it: a value that names an existing file, or a single token shaped like a path (`/...`, `./...`, `../...`, `~/...`, or `dir/name.md`), fails before any request and points at `--desc-file`.
+Text that only mentions a path, or a URL, goes through as text.
+A separate option was chosen over guessing from the value or a curl-style `@path`, because the CLI already spells files as named options or positionals (`--from-note`, `attach`) and `-` as stdin, and an explicit option never reads a file the caller meant as text.
 
 ### Comments
 

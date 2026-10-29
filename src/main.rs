@@ -147,9 +147,15 @@ enum IssueCmd {
         #[arg(long)]
         due: Option<String>,
 
-        /// Description as markdown; `-` reads stdin. Converted to HTML on write.
+        /// Description as markdown text, never a path (use --desc-file for a
+        /// file); `-` reads stdin. Converted to HTML on write.
         #[arg(long, value_name = "MARKDOWN")]
         desc_md: Option<String>,
+
+        /// Description read from a markdown file; `-` reads stdin. Converted
+        /// to HTML on write.
+        #[arg(long, value_name = "PATH", conflicts_with = "desc_md")]
+        desc_file: Option<PathBuf>,
 
         /// Label to set, by name. Repeatable. `--label none` means no labels.
         #[arg(long = "label", value_name = "LABEL")]
@@ -190,10 +196,16 @@ enum IssueCmd {
         #[arg(long)]
         module: Option<String>,
 
-        /// New description as markdown; `-` reads stdin. Converted to HTML on
-        /// write, and replaces the whole description.
+        /// New description as markdown text, never a path (use --desc-file
+        /// for a file); `-` reads stdin. Converted to HTML on write, and
+        /// replaces the whole description.
         #[arg(long, value_name = "MARKDOWN")]
         desc_md: Option<String>,
+
+        /// New description read from a markdown file; `-` reads stdin.
+        /// Converted to HTML on write, and replaces the whole description.
+        #[arg(long, value_name = "PATH", conflicts_with = "desc_md")]
+        desc_file: Option<PathBuf>,
 
         /// Label to set, by name. Repeatable, and replaces the issue's
         /// current labels rather than adding to them. A single
@@ -302,6 +314,7 @@ fn main() {
                 start,
                 due,
                 desc_md,
+                desc_file,
                 labels,
                 assignees,
             } => cmd::issue_create(cmd::CreateArgs {
@@ -314,6 +327,7 @@ fn main() {
                 start,
                 due,
                 desc_md,
+                desc_file,
                 labels,
                 assignees,
                 format,
@@ -327,6 +341,7 @@ fn main() {
                 title,
                 module,
                 desc_md,
+                desc_file,
                 labels,
                 assignees,
             } => cmd::issue_update(cmd::UpdateArgs {
@@ -338,6 +353,7 @@ fn main() {
                 title,
                 module,
                 desc_md,
+                desc_file,
                 labels,
                 assignees,
                 format,
@@ -552,6 +568,33 @@ mod tests {
         assert!(Cli::try_parse_from(["plane", "config", "unset", "workspace"]).is_ok());
         assert!(Cli::try_parse_from(["plane", "config", "show"]).is_ok());
         assert!(Cli::try_parse_from(["plane", "config", "path"]).is_ok());
+    }
+
+    #[test]
+    fn desc_file_takes_a_path_and_excludes_desc_md() {
+        let cli = Cli::try_parse_from([
+            "plane",
+            "issue",
+            "update",
+            "RES-1",
+            "--desc-file",
+            "/tmp/d.md",
+        ])
+        .unwrap();
+        match cli.command {
+            Commands::Issue(IssueCmd::Update { desc_file, .. }) => {
+                assert_eq!(desc_file, Some(PathBuf::from("/tmp/d.md")));
+            }
+            _ => panic!("wrong command"),
+        }
+        for sub in [
+            vec!["plane", "issue", "update", "RES-1"],
+            vec!["plane", "issue", "create", "RES", "T"],
+        ] {
+            let mut argv = sub.clone();
+            argv.extend(["--desc-md", "x", "--desc-file", "/tmp/d.md"]);
+            assert!(Cli::try_parse_from(argv).is_err(), "{sub:?}");
+        }
     }
 
     #[test]

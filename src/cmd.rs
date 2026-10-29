@@ -344,6 +344,7 @@ pub struct CreateArgs {
     pub start: Option<String>,
     pub due: Option<String>,
     pub desc_md: Option<String>,
+    pub desc_file: Option<PathBuf>,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
     pub format: Format,
@@ -354,6 +355,11 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
     let start_date = create_date(args.start.as_deref(), "--start")?;
     let target_date = create_date(args.due.as_deref(), "--due")?;
     check_date_order(&start_date, &target_date)?;
+    // Read before any request too, so a path given as text, or a file that
+    // cannot be read, costs no call and creates no half-described issue.
+    let description_html =
+        description_markdown(args.desc_md.as_deref(), args.desc_file.as_deref())?
+            .map(|md| markdown::to_html(&md));
 
     // With --from-note the project positional is absent, so clap puts the
     // single remaining positional (the title) into `project`.
@@ -415,10 +421,7 @@ pub fn issue_create(args: CreateArgs) -> Result<()> {
     };
     let body = write_body(IssueFields {
         name: Some(title.clone()),
-        description_html: match &args.desc_md {
-            Some(md) => Some(markdown::to_html(&read_markdown(md)?)),
-            None => None,
-        },
+        description_html,
         state_id: match &args.state {
             Some(s) => Some(c.resolve_state(&project_id, s)?),
             None => None,
@@ -695,6 +698,7 @@ pub struct UpdateArgs {
     pub title: Option<String>,
     pub module: Option<String>,
     pub desc_md: Option<String>,
+    pub desc_file: Option<PathBuf>,
     pub labels: Vec<String>,
     pub assignees: Vec<String>,
     pub format: Format,
@@ -709,10 +713,11 @@ fn check_something_to_update(args: &UpdateArgs) -> Result<()> {
         && args.title.is_none()
         && args.module.is_none()
         && args.desc_md.is_none()
+        && args.desc_file.is_none()
         && args.labels.is_empty()
         && args.assignees.is_empty()
     {
-        bail!("Nothing to update. Pass at least one of --state, --priority, --start, --due, --title, --module, --desc-md, --label, --assignee.");
+        bail!("Nothing to update. Pass at least one of --state, --priority, --start, --due, --title, --module, --desc-md, --desc-file, --label, --assignee.");
     }
     Ok(())
 }
@@ -724,10 +729,9 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
     check_date_order(&start_date, &target_date)?;
     // Read before any request, so a stdin that cannot be read costs no call.
     // The description is replaced whole: Plane has no append.
-    let description_html = match &args.desc_md {
-        Some(md) => Some(markdown::to_html(&read_markdown(md)?)),
-        None => None,
-    };
+    let description_html =
+        description_markdown(args.desc_md.as_deref(), args.desc_file.as_deref())?
+            .map(|md| markdown::to_html(&md));
 
     let c = Client::new()?;
     let r = IssueRef::parse(&args.reference)?;
@@ -998,6 +1002,60 @@ fn attachment_meta(path: &Path, size: u64) -> Result<(String, &'static str)> {
     Ok((name.to_string(), mime::from_path(path)))
 }
 
+/// The description markdown of a create or update: `--desc-md` text (`-` for
+/// stdin), or the contents of the `--desc-file` path (`-` for stdin too).
+///
+/// `--desc-md` is text, so a lone file path given to it is refused rather
+/// than stored: `--desc-md /tmp/desc.md` once wrote that path as the
+/// description and reported success.
+fn description_markdown(desc_md: Option<&str>, desc_file: Option<&Path>) -> Result<Option<String>> {
+    match (desc_md, desc_file) {
+        (Some(_), Some(_)) => bail!("Pass either --desc-md or --desc-file, not both."),
+        (Some(md), None) => {
+            refuse_path_as_text(md)?;
+            read_markdown(md).map(Some)
+        }
+        (None, Some(path)) if path == Path::new("-") => read_markdown("-").map(Some),
+        (None, Some(path)) => std::fs::read_to_string(path)
+            .with_context(|| format!("Could not read --desc-file {}", path.display()))
+            .map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
+/// Refuse `--desc-md` text that is nothing but a file path: one that exists,
+/// or a lone token shaped like one. Nobody means a bare path as an issue
+/// description, and storing it silently loses the description they did mean.
+fn refuse_path_as_text(md: &str) -> Result<()> {
+    let t = md.trim();
+    if t == "-" || t.is_empty() || t.contains(char::is_whitespace) {
+        return Ok(());
+    }
+    let hint = "--desc-md takes markdown text, not a path. Read a file with --desc-file <path>, or pipe the text through --desc-md - if it really is the description.";
+    if Path::new(t).is_file() {
+        bail!("\"{t}\" is a file. {hint}");
+    }
+    if looks_like_path(t) {
+        bail!("\"{t}\" looks like a file path, and no such file exists. {hint}");
+    }
+    Ok(())
+}
+
+/// A lone token anchored like a path (`/`, `./`, `../`, `~/`), or a relative
+/// one ending in a text extension. URLs are not paths.
+fn looks_like_path(t: &str) -> bool {
+    if t.contains("://") {
+        return false;
+    }
+    let anchored = ["/", "./", "../", "~/"].iter().any(|p| t.starts_with(p));
+    let lower = t.to_lowercase();
+    let text_file = t.contains('/')
+        && [".md", ".markdown", ".txt"]
+            .iter()
+            .any(|e| lower.ends_with(e));
+    anchored || text_file
+}
+
 /// Take markdown from the argument, or from stdin when it is `-`.
 fn read_markdown(arg: &str) -> Result<String> {
     if arg == "-" {
@@ -1181,6 +1239,7 @@ mod tests {
             title: None,
             module: None,
             desc_md: None,
+            desc_file: None,
             labels: Vec::new(),
             assignees: Vec::new(),
             format: Format::Text,
@@ -1214,6 +1273,82 @@ mod tests {
             ..update_args()
         };
         assert!(check_something_to_update(&args).is_ok());
+        assert!(err.contains("--desc-file"), "{err}");
+        let args = UpdateArgs {
+            desc_file: Some("/tmp/desc.md".into()),
+            ..update_args()
+        };
+        assert!(check_something_to_update(&args).is_ok());
+    }
+
+    #[test]
+    fn desc_file_reads_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desc.md");
+        std::fs::write(&path, "# Title\n\n- **one**\n").unwrap();
+        assert_eq!(
+            description_markdown(None, Some(&path)).unwrap().as_deref(),
+            Some("# Title\n\n- **one**\n")
+        );
+        let missing = dir.path().join("nope.md");
+        let err = format!(
+            "{:#}",
+            description_markdown(None, Some(&missing)).unwrap_err()
+        );
+        assert!(err.contains("Could not read --desc-file"), "{err}");
+        assert_eq!(description_markdown(None, None).unwrap(), None);
+    }
+
+    #[test]
+    fn desc_md_refuses_a_path_instead_of_storing_it() {
+        // The original defect: an existing file passed as text.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("desc.md");
+        std::fs::write(&path, "body").unwrap();
+        let arg = path.to_str().unwrap();
+        let err = description_markdown(Some(arg), None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is a file"), "{err}");
+        assert!(err.contains("--desc-file"), "{err}");
+        // A path to nothing is refused too, rather than stored.
+        for arg in [
+            "/tmp/perso230/nope.md",
+            "./desc",
+            "../x",
+            "~/d.md",
+            "notes/desc.md",
+        ] {
+            let err = description_markdown(Some(arg), None)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("looks like a file path"), "{arg}: {err}");
+        }
+    }
+
+    #[test]
+    fn desc_md_still_takes_text_that_merely_mentions_paths() {
+        for arg in [
+            "**bold** text",
+            "n/a",
+            "See /tmp/desc.md for details",
+            "https://example.org/notes/desc.md",
+            "TODO",
+        ] {
+            assert_eq!(
+                description_markdown(Some(arg), None).unwrap().as_deref(),
+                Some(arg),
+                "{arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn desc_md_and_desc_file_together_are_refused() {
+        let err = description_markdown(Some("x"), Some(Path::new("/tmp/x.md")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not both"), "{err}");
     }
 
     #[test]
