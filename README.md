@@ -100,7 +100,7 @@ plane issue list RES [--state todo] [--module "Paper 2 Drawings"] [--label deep]
 plane issue create RES "title" [--module M] [--state S] [--priority P] [--start YYYY-MM-DD] [--due YYYY-MM-DD] [--label L ...] [--assignee P ...] [--desc-md TEXT|- | --desc-file PATH]
 plane issue create --from-note <note.md> "title" [...]
 plane issue update RES-12 [--state|--priority|--start|--due|--title|--module|--label|--assignee|--desc-md|--desc-file]
-plane issue comment RES-12 "text"
+plane issue comment RES-12 "text" | --file PATH
 plane issue comments RES-12
 plane issue attach RES-12 <file> [<file> ...]
 plane issue attachments RES-12
@@ -176,6 +176,18 @@ Text that only mentions a path, or a URL, goes through as text.
 A separate option was chosen over guessing from the value or a curl-style `@path`, because the CLI already spells files as named options or positionals (`--from-note`, `attach`) and `-` as stdin, and an explicit option never reads a file the caller meant as text.
 
 ### Comments
+
+`issue comment` posts markdown, converted to HTML, given exactly one way: as the text positional, or with `--file` naming a markdown file.
+Both take `-` to read stdin, and a long comment belongs in a file.
+
+```
+plane issue comment RES-12 --file /tmp/comment.md
+plane issue comment RES-12 "Done, see the **attached** log."
+```
+
+Passing both, or neither, is an error.
+The text refuses a lone file path the way `--desc-md` does: `plane issue comment RES-12 /tmp/x.md` fails before any request and points at `--file`, instead of posting the path.
+A comment that only mentions a path, or a URL, posts as text.
 
 `issue comments` lists every comment of an issue, oldest first, across every page.
 Each one prints as a header line with its time in UTC and its author's display name, then the body as plain text.

@@ -801,11 +801,18 @@ pub fn issue_update(args: UpdateArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn issue_comment(reference: &str, text: &str, format: Format) -> Result<()> {
+pub fn issue_comment(
+    reference: &str,
+    text: Option<&str>,
+    file: Option<&Path>,
+    format: Format,
+) -> Result<()> {
+    // Read before any request, so a path given as text, or a file that
+    // cannot be read, costs no call and posts nothing.
+    let body = comment_markdown(text, file)?;
     let c = Client::new()?;
     let r = IssueRef::parse(reference)?;
     let issue = c.issue_by_ref(&r)?;
-    let body = read_markdown(text)?;
     let created = c.create_comment(
         required_field(&issue, "project", r.as_str())?,
         required_field(&issue, "id", r.as_str())?,
@@ -1009,29 +1016,65 @@ fn attachment_meta(path: &Path, size: u64) -> Result<(String, &'static str)> {
 /// than stored: `--desc-md /tmp/desc.md` once wrote that path as the
 /// description and reported success.
 fn description_markdown(desc_md: Option<&str>, desc_file: Option<&Path>) -> Result<Option<String>> {
-    match (desc_md, desc_file) {
-        (Some(_), Some(_)) => bail!("Pass either --desc-md or --desc-file, not both."),
+    markdown_text_or_file(
+        desc_md,
+        desc_file,
+        "--desc-md",
+        "--desc-file",
+        "--desc-md takes markdown text, not a path. Read a file with --desc-file <path>, or pipe the text through --desc-md - if it really is the description.",
+    )
+}
+
+/// The markdown of a comment: the positional text (`-` for stdin), or the
+/// contents of the `--file` path (`-` for stdin too). Exactly one is needed.
+///
+/// The text is refused when it is only a file path, as `--desc-md` is:
+/// `plane issue comment RES-12 /tmp/x.md` once posted that path as the
+/// comment.
+fn comment_markdown(text: Option<&str>, file: Option<&Path>) -> Result<String> {
+    markdown_text_or_file(
+        text,
+        file,
+        "the comment text",
+        "--file",
+        "The comment text is markdown, not a path. Post a file with --file <path>, or pipe the text through `-` if it really is the comment.",
+    )?
+    .context("Pass the comment text, or --file <path> to post a markdown file.")
+}
+
+/// Markdown given either as text (`-` for stdin) or as the path of a file
+/// (`-` for stdin too), never both. Text that is only a file path is refused
+/// with `hint`, which points at the file option.
+fn markdown_text_or_file(
+    text: Option<&str>,
+    file: Option<&Path>,
+    text_name: &str,
+    file_name: &str,
+    hint: &str,
+) -> Result<Option<String>> {
+    match (text, file) {
+        (Some(_), Some(_)) => bail!("Pass either {text_name} or {file_name}, not both."),
         (Some(md), None) => {
-            refuse_path_as_text(md)?;
+            refuse_path_as_text(md, hint)?;
             read_markdown(md).map(Some)
         }
         (None, Some(path)) if path == Path::new("-") => read_markdown("-").map(Some),
         (None, Some(path)) => std::fs::read_to_string(path)
-            .with_context(|| format!("Could not read --desc-file {}", path.display()))
+            .with_context(|| format!("Could not read {file_name} {}", path.display()))
             .map(Some),
         (None, None) => Ok(None),
     }
 }
 
-/// Refuse `--desc-md` text that is nothing but a file path: one that exists,
+/// Refuse markdown text that is nothing but a file path: one that exists,
 /// or a lone token shaped like one. Nobody means a bare path as an issue
-/// description, and storing it silently loses the description they did mean.
-fn refuse_path_as_text(md: &str) -> Result<()> {
+/// description or a comment, and storing it silently loses the text they did
+/// mean.
+fn refuse_path_as_text(md: &str, hint: &str) -> Result<()> {
     let t = md.trim();
     if t == "-" || t.is_empty() || t.contains(char::is_whitespace) {
         return Ok(());
     }
-    let hint = "--desc-md takes markdown text, not a path. Read a file with --desc-file <path>, or pipe the text through --desc-md - if it really is the description.";
     if Path::new(t).is_file() {
         bail!("\"{t}\" is a file. {hint}");
     }
@@ -1349,6 +1392,66 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("not both"), "{err}");
+    }
+
+    #[test]
+    fn comment_file_reads_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("comment.md");
+        std::fs::write(&path, "Done:\n\n- **one**\n").unwrap();
+        assert_eq!(
+            comment_markdown(None, Some(&path)).unwrap(),
+            "Done:\n\n- **one**\n"
+        );
+        let missing = dir.path().join("nope.md");
+        let err = format!("{:#}", comment_markdown(None, Some(&missing)).unwrap_err());
+        assert!(err.contains("Could not read --file"), "{err}");
+    }
+
+    #[test]
+    fn comment_text_refuses_a_path_instead_of_posting_it() {
+        // The original defect: an existing file passed as the comment text.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("x.md");
+        std::fs::write(&path, "body").unwrap();
+        let arg = path.to_str().unwrap();
+        let err = comment_markdown(Some(arg), None).unwrap_err().to_string();
+        assert!(err.contains("is a file"), "{err}");
+        assert!(err.contains("--file <path>"), "{err}");
+        assert!(!err.contains("--desc"), "{err}");
+        for arg in [
+            "/tmp/perso230/nope.md",
+            "./c",
+            "../x",
+            "~/c.md",
+            "notes/c.md",
+        ] {
+            let err = comment_markdown(Some(arg), None).unwrap_err().to_string();
+            assert!(err.contains("looks like a file path"), "{arg}: {err}");
+            assert!(err.contains("--file"), "{arg}: {err}");
+        }
+    }
+
+    #[test]
+    fn comment_text_still_posts_text_that_merely_mentions_paths() {
+        for arg in [
+            "Done, see /tmp/x.md for the log",
+            "https://example.org/notes/x.md",
+            "n/a",
+            "LGTM",
+        ] {
+            assert_eq!(comment_markdown(Some(arg), None).unwrap(), arg, "{arg}");
+        }
+    }
+
+    #[test]
+    fn comment_needs_exactly_one_of_text_and_file() {
+        let err = comment_markdown(Some("x"), Some(Path::new("/tmp/x.md")))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("either the comment text or --file"), "{err}");
+        let err = comment_markdown(None, None).unwrap_err().to_string();
+        assert!(err.contains("--file"), "{err}");
     }
 
     #[test]

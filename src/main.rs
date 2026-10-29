@@ -225,8 +225,15 @@ enum IssueCmd {
         /// Issue reference, e.g. RES-12
         reference: String,
 
-        /// Comment as markdown; `-` reads stdin
-        text: String,
+        /// Comment as markdown text, never a path (use --file for a file);
+        /// `-` reads stdin. Required unless --file is given.
+        #[arg(value_name = "TEXT", required_unless_present = "file")]
+        text: Option<String>,
+
+        /// Comment read from a markdown file; `-` reads stdin. Use it for a
+        /// long comment instead of passing the text.
+        #[arg(long, value_name = "PATH", conflicts_with = "text")]
+        file: Option<PathBuf>,
     },
 
     /// List the comments of an issue, oldest first
@@ -358,7 +365,11 @@ fn main() {
                 assignees,
                 format,
             }),
-            IssueCmd::Comment { reference, text } => cmd::issue_comment(&reference, &text, format),
+            IssueCmd::Comment {
+                reference,
+                text,
+                file,
+            } => cmd::issue_comment(&reference, text.as_deref(), file.as_deref(), format),
             IssueCmd::Comments { reference } => cmd::issue_comments(&reference, format),
             IssueCmd::Attach { reference, files } => cmd::issue_attach(&reference, &files, format),
             IssueCmd::Attachments { reference } => cmd::issue_attachments(&reference, format),
@@ -595,6 +606,32 @@ mod tests {
             argv.extend(["--desc-md", "x", "--desc-file", "/tmp/d.md"]);
             assert!(Cli::try_parse_from(argv).is_err(), "{sub:?}");
         }
+    }
+
+    #[test]
+    fn comment_takes_text_or_file_but_not_both_nor_neither() {
+        let cli =
+            Cli::try_parse_from(["plane", "issue", "comment", "RES-1", "--file", "/tmp/c.md"])
+                .unwrap();
+        match cli.command {
+            Commands::Issue(IssueCmd::Comment { text, file, .. }) => {
+                assert_eq!(text, None);
+                assert_eq!(file, Some(PathBuf::from("/tmp/c.md")));
+            }
+            _ => panic!("wrong command"),
+        }
+        assert!(Cli::try_parse_from(["plane", "issue", "comment", "RES-1", "hi"]).is_ok());
+        assert!(Cli::try_parse_from(["plane", "issue", "comment", "RES-1"]).is_err());
+        assert!(Cli::try_parse_from([
+            "plane",
+            "issue",
+            "comment",
+            "RES-1",
+            "hi",
+            "--file",
+            "/tmp/c.md"
+        ])
+        .is_err());
     }
 
     #[test]
